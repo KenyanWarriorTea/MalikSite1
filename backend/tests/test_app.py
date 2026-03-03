@@ -35,6 +35,7 @@ def test_teacher_can_add_assignment_and_view_it():
 
     page = client.get("/teacher")
     assert "Print 42" in page.text
+    assert "button::before" in page.text
 
 
 def test_student_submission_is_visible_for_teacher(monkeypatch):
@@ -74,4 +75,21 @@ def test_student_submission_is_visible_for_teacher(monkeypatch):
 def test_login_page_contains_updated_ui_styles():
     page = client.get("/")
     assert "button::before" in page.text
+    assert "max-width: 720px;" in page.text
+    assert "transition: all 250ms;" in page.text
+
+
+def test_student_page_contains_updated_ui_styles():
+    client.post("/login", data={"name": "Teacher", "role": "teacher"})
+    client.post(
+        "/teacher/assignments",
+        data={
+            "title": "Task",
+            "description": "Desc",
+            "expected_output": "",
+            "language_id": 71,
+        },
+    )
+    client.post("/login", data={"name": "Student", "role": "student"})
+    page = client.get("/student")
     assert "max-width: 720px;" in page.text
