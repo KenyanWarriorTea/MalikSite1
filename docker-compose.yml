@@ -6,6 +6,8 @@ services:
       context: ./backend
     ports:
       - '8000:8000'
+    environment:
+      JUDGE0_URL: http://judge0:2358
     volumes:
       - ./backend:/app
     networks:
