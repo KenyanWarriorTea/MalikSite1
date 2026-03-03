@@ -69,3 +69,9 @@ def test_student_submission_is_visible_for_teacher(monkeypatch):
     assert "Student" in teacher_page.text
     assert "Accepted" in teacher_page.text
     assert 'print(&quot;hello&quot;)' in teacher_page.text
+
+
+def test_login_page_contains_updated_ui_styles():
+    page = client.get("/")
+    assert "button::before" in page.text
+    assert "max-width: 720px;" in page.text

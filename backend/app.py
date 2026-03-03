@@ -19,6 +19,73 @@ submissions: list[dict[str, Any]] = []
 assignment_id_seq = 1
 submission_id_seq = 1
 
+UI_STYLES = """
+<style>
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px;
+  line-height: 1.5;
+}
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+input, textarea {
+  width: 100%;
+  max-width: 720px;
+  padding: 12px 14px;
+  border: 1px solid #cfcfcf;
+  border-radius: 10px;
+  font-size: 16px;
+  box-sizing: border-box;
+}
+textarea {
+  min-height: 120px;
+}
+button {
+  padding: 15px 25px;
+  border: unset;
+  border-radius: 15px;
+  color: #212121;
+  z-index: 1;
+  background: #e8e8e8;
+  position: relative;
+  font-weight: 1000;
+  font-size: 17px;
+  -webkit-box-shadow: 4px 8px 19px -3px rgba(0,0,0,0.27);
+  box-shadow: 4px 8px 19px -3px rgba(0,0,0,0.27);
+  transition: all 250ms;
+  overflow: hidden;
+  cursor: pointer;
+  width: fit-content;
+}
+button::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 0;
+  border-radius: 15px;
+  background-color: #212121;
+  z-index: -1;
+  -webkit-box-shadow: 4px 8px 19px -3px rgba(0,0,0,0.27);
+  box-shadow: 4px 8px 19px -3px rgba(0,0,0,0.27);
+  transition: all 250ms;
+}
+button:hover {
+  color: #e8e8e8;
+}
+button:hover::before {
+  width: 100%;
+}
+</style>
+"""
+
 
 def require_role(request: Request, role: str):
     if request.session.get("role") != role:
@@ -52,8 +119,8 @@ def evaluate_submission(source_code: str, language_id: int, expected_output: str
 
 @app.get("/", response_class=HTMLResponse)
 def login_page():
-    return """
-    <html><body>
+    return f"""
+    <html><body>{UI_STYLES}
     <h1>Вход</h1>
     <form method='post' action='/login'>
       <input name='name' placeholder='Ваше имя' required />
@@ -95,7 +162,7 @@ def teacher_page(request: Request):
         )
 
     return f"""
-    <html><body>
+    <html><body>{UI_STYLES}
     <h1>Панель учителя: {name}</h1>
     <a href='/'>Сменить роль</a>
     <h2>Добавить задание</h2>
@@ -161,7 +228,7 @@ def student_page(request: Request):
         )
 
     return f"""
-    <html><body>
+    <html><body>{UI_STYLES}
     <h1>Панель ученика: {name}</h1>
     <a href='/'>Сменить роль</a>
     <h2>Доступные задания</h2>
