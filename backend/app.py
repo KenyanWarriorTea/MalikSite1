@@ -1,14 +1,18 @@
 import html
 import os
+import secrets
 from typing import Any
 
 import requests
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 app = FastAPI(title="MalikSite1")
 
 JUDGE0_URL = os.getenv("JUDGE0_URL", "http://judge0:2358")
+SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_urlsafe(32)
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 
 assignments: list[dict[str, Any]] = []
 submissions: list[dict[str, Any]] = []
@@ -17,7 +21,7 @@ submission_id_seq = 1
 
 
 def require_role(request: Request, role: str):
-    if request.cookies.get("role") != role:
+    if request.session.get("role") != role:
         return RedirectResponse(url="/", status_code=303)
     return None
 
@@ -61,14 +65,13 @@ def login_page():
 
 
 @app.post("/login")
-def login(name: str = Form(...), role: str = Form(...)):
+def login(request: Request, name: str = Form(...), role: str = Form(...)):
     if role not in {"teacher", "student"}:
         return RedirectResponse(url="/", status_code=303)
+    request.session["name"] = name
+    request.session["role"] = role
     destination = "/teacher" if role == "teacher" else "/student"
-    response = RedirectResponse(url=destination, status_code=303)
-    response.set_cookie("name", name)
-    response.set_cookie("role", role)
-    return response
+    return RedirectResponse(url=destination, status_code=303)
 
 
 @app.get("/teacher", response_class=HTMLResponse)
@@ -77,7 +80,7 @@ def teacher_page(request: Request):
     if redirect:
         return redirect
 
-    name = html.escape(request.cookies.get("name", "Учитель"))
+    name = html.escape(request.session.get("name", "Учитель"))
     assignment_items = []
     for assignment in assignments:
         assignment_submissions = [s for s in submissions if s["assignment_id"] == assignment["id"]]
@@ -141,7 +144,7 @@ def student_page(request: Request):
     if redirect:
         return redirect
 
-    name = html.escape(request.cookies.get("name", "Ученик"))
+    name = html.escape(request.session.get("name", "Ученик"))
     cards = []
     for assignment in assignments:
         cards.append(
@@ -183,7 +186,7 @@ def submit_solution(request: Request, assignment_id: int = Form(...), code: str 
         {
             "id": submission_id_seq,
             "assignment_id": assignment_id,
-            "student_name": request.cookies.get("name", "Ученик"),
+            "student_name": request.session.get("name", "Ученик"),
             "code": code,
             "status": result["status"],
             "stdout": result["stdout"],
