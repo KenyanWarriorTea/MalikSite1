@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 # Import after env setup
 import app as web_app
-from models import Base
+from models import Base, Assignment
 import database
 
 # Override the database to use our test configuration
@@ -226,3 +226,89 @@ def test_unauthorized_access_redirects():
     """Test that unauthorized access redirects to login"""
     response = client.get("/teacher", follow_redirects=False)
     assert response.status_code == 307 or response.status_code == 303
+
+
+def test_teacher_can_create_code_assignment_with_tests():
+    """Teacher can create code assignment with tests and limits"""
+    client.post(
+        "/login",
+        data={"name": "Teacher5", "access_code": "teacher123"},
+    )
+    response = client.post(
+        "/teacher/assignments",
+        data={
+            "title": "Sum A+B",
+            "description": "Return sum",
+            "reference_code": "a,b=map(int,input().split());print(a+b)",
+            "expected_output": "",
+            "language_id": 71,
+            "is_code_assignment": "on",
+            "tests_json": '[{"input":"2 3","expected_output":"5"}]',
+            "time_limit": 3,
+            "memory_limit": 512,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    db = database.SessionLocal()
+    try:
+        assignment = db.query(Assignment).filter(Assignment.title == "Sum A+B").first()
+        assert assignment is not None
+        assert assignment.is_code_assignment is True
+        assert assignment.tests == [{"input": "2 3", "expected_output": "5"}]
+        assert assignment.time_limit == 3
+        assert assignment.memory_limit == 512
+    finally:
+        db.close()
+
+
+def test_submit_code_api_returns_json_result(monkeypatch):
+    """Code submission API returns structured verdict payload"""
+    # Create assignment as teacher
+    client.post(
+        "/login",
+        data={"name": "Teacher6", "access_code": "teacher123"},
+    )
+    client.post(
+        "/teacher/assignments",
+        data={
+            "title": "Code API Task",
+            "description": "desc",
+            "reference_code": "print(1)",
+            "language_id": 71,
+            "is_code_assignment": "on",
+            "tests_json": '[{"input":"","expected_output":"1"}]',
+            "time_limit": 2,
+            "memory_limit": 256,
+        },
+    )
+
+    # Switch to student
+    client.post(
+        "/login",
+        data={"name": "Student4", "access_code": "student123"},
+    )
+
+    def fake_eval_and_store_submission(db, assignment, student_id, code, language_id):
+        return None, {
+            "verdict": "Accepted",
+            "details": "Accepted",
+            "tests_passed": 1,
+            "total_tests": 1,
+        }
+
+    monkeypatch.setattr(web_app, "evaluate_and_store_submission", fake_eval_and_store_submission)
+
+    response = client.post(
+        "/submit_code",
+        json={
+            "assignment_id": 1,
+            "code": "print(1)",
+            "language": "python",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["verdict"] == "Accepted"
+    assert response.json()["tests_passed"] == 1
+    assert response.json()["total_tests"] == 1
