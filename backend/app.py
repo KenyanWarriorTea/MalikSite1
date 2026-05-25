@@ -16,6 +16,16 @@ from starlette.middleware.sessions import SessionMiddleware
 from database import init_db, get_db
 from models import User, Assignment, Submission, StudentActivity, SubmissionStatus
 from judge0_client import evaluate_submission
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import PlainTextResponse
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Initialize database
 init_db()
@@ -24,6 +34,22 @@ app = FastAPI(title="MalikSite1")
 
 SESSION_SECRET = secrets.token_urlsafe(32)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
+# Error handling middleware
+class ErrorHandlingMiddleware(BaseHTTPMiddleware):
+    """Middleware for handling and logging errors"""
+    async def dispatch(self, request: Request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as exc:
+            logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+            return PlainTextResponse(
+                "An error occurred. Please try again later.",
+                status_code=500
+            )
+
+app.add_middleware(ErrorHandlingMiddleware)
 
 # Secret codes for access
 TEACHER_CODE = "teacher123"
@@ -399,38 +425,63 @@ def submit_solution(
     if not user_id:
         return RedirectResponse(url="/")
     
-    # Get assignment
-    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
-    if not assignment:
-        return RedirectResponse(url="/student")
-    
-    # Create submission with pending status
-    submission = Submission(
-        assignment_id=assignment_id,
-        student_id=user_id,
-        code=code,
-        status=SubmissionStatus.PENDING.value
-    )
-    db.add(submission)
-    db.commit()
-    db.refresh(submission)
-    
-    # Evaluate code using Judge0
-    result = evaluate_submission(
-        code,
-        assignment.language_id,
-        assignment.expected_output,
-        ""
-    )
-    
-    # Update submission with results
-    submission.status = result["status"]
-    submission.stdout = result.get("stdout", "")
-    submission.stderr = result.get("stderr", "")
-    submission.judge0_token = result.get("token")
-    submission.evaluated_at = datetime.utcnow()
-    
-    db.commit()
+    try:
+        # Validate code is not empty
+        if not code or not code.strip():
+            logger.warning(f"Empty submission from user {user_id}")
+            return RedirectResponse(url="/student", status_code=303)
+        
+        # Get assignment
+        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        if not assignment:
+            logger.warning(f"Invalid assignment {assignment_id} from user {user_id}")
+            return RedirectResponse(url="/student", status_code=303)
+        
+        # Create submission with pending status
+        submission = Submission(
+            assignment_id=assignment_id,
+            student_id=user_id,
+            code=code,
+            status=SubmissionStatus.PENDING.value
+        )
+        db.add(submission)
+        db.commit()
+        db.refresh(submission)
+        
+        logger.info(f"Submission {submission.id} created for user {user_id}, assignment {assignment_id}")
+        
+        # Evaluate code using Judge0
+        try:
+            result = evaluate_submission(
+                code,
+                assignment.language_id,
+                assignment.expected_output,
+                ""
+            )
+            
+            # Update submission with results
+            submission.status = result["status"]
+            submission.stdout = result.get("stdout", "")
+            submission.stderr = result.get("stderr", "")
+            submission.judge0_token = result.get("token")
+            submission.evaluated_at = datetime.utcnow()
+            
+            logger.info(f"Submission {submission.id} evaluated: {result['status']}")
+        except Exception as e:
+            logger.error(f"Judge0 evaluation error: {str(e)}", exc_info=True)
+            submission.status = SubmissionStatus.ERROR.value
+            submission.stderr = f"Evaluation service error: {str(e)}"
+            submission.evaluated_at = datetime.utcnow()
+        
+        db.commit()
+        
+    except Exception as e:
+        logger.error(f"Error during submission: {str(e)}", exc_info=True)
+        # Try to rollback if something went wrong
+        try:
+            db.rollback()
+        except:
+            pass
     
     return RedirectResponse(url="/student", status_code=303)
 
