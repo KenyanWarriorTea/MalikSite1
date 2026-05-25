@@ -976,7 +976,7 @@ async def submission_stream(
                     break
         except Exception as e:
             logger.error(f"Error in submission stream: {e}", exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e), 'complete': True})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Stream processing error', 'complete': True})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
