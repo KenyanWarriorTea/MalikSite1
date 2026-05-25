@@ -166,6 +166,79 @@ def wait_for_judge0_result(
 
 
 
+def stream_judge0_result(
+    token: str,
+    max_wait: int = 30,
+    poll_interval: float = 0.5,
+):
+    """
+    Stream Judge0 submission results in real-time.
+    Yields updates as the submission progresses through compilation and execution.
+    Yields dict with keys: status_id, compile_output, stdout, stderr, time, memory
+    """
+    start_time = time.time()
+    poll_count = 0
+    last_compile_output = ""
+    last_stdout = ""
+    last_stderr = ""
+    
+    while time.time() - start_time < max_wait:
+        result = get_judge0_result(token)
+        poll_count += 1
+        
+        # Check if we got a valid response
+        if result:
+            status_id = result.get("status_id")
+            
+            # If status_id is None, the API didn't return a status yet
+            if status_id is None:
+                logger.debug(f"Stream poll #{poll_count}: No status_id yet, continuing...")
+                time.sleep(poll_interval)
+                continue
+            
+            # Yield any new output that appeared
+            current_compile_output = result.get("compile_output", "")
+            current_stdout = result.get("stdout", "")
+            current_stderr = result.get("stderr", "")
+            
+            has_new_output = (
+                current_compile_output != last_compile_output or
+                current_stdout != last_stdout or
+                current_stderr != last_stderr or
+                status_id not in [1, 2]  # Status changed
+            )
+            
+            if has_new_output:
+                logger.debug(f"Stream poll #{poll_count}: Status {status_id}, yielding update")
+                yield {
+                    "status_id": status_id,
+                    "compile_output": current_compile_output,
+                    "stdout": current_stdout,
+                    "stderr": current_stderr,
+                    "time": result.get("time", "0"),
+                    "memory": result.get("memory", "0"),
+                    "complete": status_id not in [1, 2],
+                }
+                
+                last_compile_output = current_compile_output
+                last_stdout = current_stdout
+                last_stderr = current_stderr
+                
+                # If submission is complete, stop streaming
+                if status_id not in [1, 2]:
+                    logger.info(f"Stream complete: Poll #{poll_count}, status {status_id}")
+                    return
+            
+            logger.debug(f"Stream poll #{poll_count}: Status {status_id}, no new output")
+        else:
+            logger.debug(f"Stream poll #{poll_count}: Empty response from Judge0, retrying...")
+        
+        time.sleep(poll_interval)
+    
+    logger.warning(f"Stream timeout after {poll_count} attempts and {max_wait}s")
+    return
+
+
 def map_judge0_status(status_id: Optional[int], status_desc: str) -> str:
     """
     Map Judge0 status ID and description to our status enum.
@@ -305,13 +378,15 @@ def evaluate_code_with_tests(
             "tests_passed": 0,
             "total_tests": 0,
             "failed_test_number": None,
-            "test_results": []
+            "test_results": [],
+            "token": None,
         }
     
     test_results = []
     tests_passed = 0
     failed_test_number = None
     overall_status = "Accepted"
+    token = None  # Will store the first token for streaming
     
     for test_num, test in enumerate(tests, 1):
         test_input = test.get("input", "")
@@ -327,6 +402,10 @@ def evaluate_code_with_tests(
             memory_limit
         )
         
+        # Store the first token
+        if token is None and result.get("token"):
+            token = result.get("token")
+        
         actual_output = result.get("stdout", "").strip()
         expected_output_stripped = expected_output.strip()
         
@@ -339,6 +418,7 @@ def evaluate_code_with_tests(
             "stderr": result.get("stderr", ""),
             "time": result.get("time", "0"),
             "memory": result.get("memory", "0"),
+            "token": result.get("token"),  # Store token per test
         }
         
         # Check if output matches (only if no errors)
@@ -373,5 +453,6 @@ def evaluate_code_with_tests(
         "tests_passed": tests_passed,
         "total_tests": len(tests),
         "failed_test_number": failed_test_number,
-        "test_results": test_results
+        "test_results": test_results,
+        "token": token,  # Return first token for streaming
     }
