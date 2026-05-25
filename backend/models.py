@@ -1,6 +1,6 @@
 """Database models for MalikSite1"""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Enum, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Enum, JSON, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import enum
@@ -76,6 +76,7 @@ class Submission(Base):
     # Multi-test evaluation fields
     verdict = Column(String(50), nullable=True)  # "Accepted", "Wrong Answer on test 2", "Compilation Error", etc.
     failed_test_number = Column(Integer, nullable=True)  # Which test failed (1-indexed)
+    failed_test = Column(Integer, nullable=True)  # Alias for API responses/compatibility
     tests_passed = Column(Integer, default=0)  # Number of tests passed
     total_tests = Column(Integer, default=0)  # Total number of tests
     test_results = Column(JSON, nullable=True)  # Detailed results for each test
