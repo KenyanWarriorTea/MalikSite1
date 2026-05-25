@@ -291,7 +291,10 @@ def test_submit_code_api_returns_json_result(monkeypatch):
     )
 
     def fake_eval_and_store_submission(db, assignment, student_id, code, language_id):
-        return None, {
+        class _Submission:
+            id = 123
+
+        return _Submission(), {
             "verdict": "Accepted",
             "details": "Accepted",
             "tests_passed": 1,
@@ -312,3 +315,21 @@ def test_submit_code_api_returns_json_result(monkeypatch):
     assert response.json()["verdict"] == "Accepted"
     assert response.json()["tests_passed"] == 1
     assert response.json()["total_tests"] == 1
+    assert response.json()["submission_id"] == 123
+
+
+def test_activity_api_without_submission_id_is_ignored():
+    """Activity endpoint should not fail when submission_id is missing."""
+    client.post(
+        "/login",
+        data={"name": "Student5", "access_code": "student123"},
+    )
+    response = client.post(
+        "/api/activity",
+        data={
+            "activity_type": "focus_lost",
+            "description": "Window lost focus",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ignored"
