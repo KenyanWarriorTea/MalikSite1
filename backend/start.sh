@@ -10,12 +10,26 @@ s = p.read_text()
 # Judge0 CE exposes /system_info reliably, while /health may be unavailable.
 s = s.replace('/health', '/system_info')
 
-# Judge0 CE 1.13 uses the query parameter base64_encoded, not base64.
+# Judge0 CE 1.13 is more stable when submission source/stdin/expected_output
+# are sent as base64. Results are still fetched decoded with base64_encoded=false.
+s = s.replace('import requests', 'import requests\nimport base64')
 s = s.replace(
     'url = f"{JUDGE0_URL}/submissions"',
-    'url = f"{JUDGE0_URL}/submissions?base64_encoded=false&wait=false"'
+    'url = f"{JUDGE0_URL}/submissions?base64_encoded=true&wait=false"'
 )
 s = s.replace('?base64=false', '?base64_encoded=false')
+s = s.replace(
+    '"source_code": source_code,',
+    '"source_code": base64.b64encode(str(source_code or "").encode()).decode(),'
+)
+s = s.replace(
+    '"expected_output": expected_output,',
+    '"expected_output": base64.b64encode(str(expected_output or "").encode()).decode(),'
+)
+s = s.replace(
+    '"stdin": stdin,',
+    '"stdin": base64.b64encode(str(stdin or "").encode()).decode(),'
+)
 
 # The app stores memory in MB, Judge0 expects KB.
 s = s.replace(
