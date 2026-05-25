@@ -1,6 +1,6 @@
 """Database models for MalikSite1"""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Enum
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Enum, JSON, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import enum
@@ -33,6 +33,14 @@ class Assignment(Base):
     expected_output = Column(Text, nullable=True)
     reference_code = Column(Text, nullable=True)
     language_id = Column(Integer, nullable=False)
+    
+    # New fields for code evaluation system
+    is_code_assignment = Column(Boolean, default=False)
+    tests = Column(JSON, nullable=True)  # List of dicts: [{"input": "2 3", "expected_output": "5"}, ...]
+    time_limit = Column(Integer, default=2)  # Seconds
+    memory_limit = Column(Integer, default=256)  # MB
+    languages = Column(JSON, nullable=True)  # List of allowed language IDs
+    
     created_at = Column(DateTime, default=datetime.utcnow)
 
     teacher = relationship("User", back_populates="assignments")
@@ -59,10 +67,21 @@ class Submission(Base):
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
     student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     code = Column(Text, nullable=False)
+    language_id = Column(Integer, nullable=True)  # Language used for this submission
     status = Column(String(50), default=SubmissionStatus.PENDING.value)
     stdout = Column(Text, nullable=True)
     stderr = Column(Text, nullable=True)
     judge0_token = Column(String(255), nullable=True)
+    
+    # Multi-test evaluation fields
+    verdict = Column(String(50), nullable=True)  # "Accepted", "Wrong Answer on test 2", "Compilation Error", etc.
+    failed_test_number = Column(Integer, nullable=True)  # Which test failed (1-indexed)
+    failed_test = Column(Integer, nullable=True)  # Alias for API responses/compatibility
+    tests_passed = Column(Integer, default=0)  # Number of tests passed
+    total_tests = Column(Integer, default=0)  # Total number of tests
+    test_results = Column(JSON, nullable=True)  # Detailed results for each test
+    time_used = Column(Float, nullable=True)  # Time used in seconds
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     evaluated_at = Column(DateTime, nullable=True)
 

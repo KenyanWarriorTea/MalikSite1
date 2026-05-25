@@ -4,6 +4,7 @@ Web application for teachers to publish assignments and students to submit solut
 Includes student activity monitoring for academic integrity.
 """
 import html
+import json
 import os
 import secrets
 from datetime import datetime
@@ -15,7 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from database import init_db, get_db
 from models import User, Assignment, Submission, StudentActivity, SubmissionStatus
-from judge0_client import evaluate_submission, compare_outputs
+from judge0_client import evaluate_submission, evaluate_code_with_tests
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
 import logging
@@ -85,6 +86,20 @@ h2 { color: #212121; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
 </style>
 """
 
+LANGUAGE_NAME_TO_ID = {
+    "python": 71,
+    "cpp": 54,
+    "java": 62,
+    "javascript": 63,
+}
+
+LANGUAGE_ID_TO_NAME = {
+    71: "Python",
+    62: "Java",
+    54: "C++",
+    63: "JavaScript",
+}
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -103,6 +118,29 @@ def get_or_create_user(db: Session, name: str, role: str) -> User:
         db.refresh(user)
     
     return user
+
+
+def parse_tests_json(raw_tests: str) -> list[dict]:
+    """Parse tests JSON from teacher form payload."""
+    if not raw_tests or not raw_tests.strip():
+        return []
+
+    try:
+        parsed = json.loads(raw_tests)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    cleaned = []
+    for test in parsed:
+        if not isinstance(test, dict):
+            continue
+        test_input = str(test.get("input", ""))
+        expected_output = str(test.get("expected_output", ""))
+        cleaned.append({"input": test_input, "expected_output": expected_output})
+    return cleaned
 
 
 def format_status(status: str) -> tuple[str, str]:
@@ -210,9 +248,7 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     for a in assignments:
         submissions = db.query(Submission).filter(Submission.assignment_id == a.id).all()
         
-        # Get language name
-        language_names = {71: "Python", 62: "Java", 54: "C++", 63: "JavaScript"}
-        language_name = language_names.get(a.language_id, "Unknown")
+        language_name = LANGUAGE_ID_TO_NAME.get(a.language_id, "Unknown")
         
         # Display reference code
         reference_display = ""
@@ -268,7 +304,9 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         assignment_items.append(
             f"<li class='card'><h3>Задание: {html.escape(a.title)}</h3>"
             f"<p>{html.escape(a.description)}</p>"
+            f"<p><strong>Тип:</strong> {'Кодинг' if a.is_code_assignment else 'Текстовое'}</p>"
             f"<p><strong>Язык:</strong> {language_name}</p>"
+            f"<p><strong>Лимиты:</strong> {a.time_limit or 2}s / {a.memory_limit or 256}MB</p>"
             f"{reference_display}"
             f"<h4 style='margin-top: 20px;'>Ответы студентов ({len(submissions)}):</h4>"
             f"<ul>{''.join(rows) or '<li>Решений пока нет</li>'}</ul>"
@@ -283,8 +321,19 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
       <h2>Добавить задание</h2>
       <input name='title' placeholder='Название задания' required />
       <textarea name='description' placeholder='Описание задания (Что нужно сделать)' required></textarea>
-      <textarea name='reference_code' placeholder='Эталонный код (правильное решение)' required></textarea>
+      <label><input type='checkbox' name='is_code_assignment' id='is_code_assignment' /> Это задание с кодом</label>
+      <textarea name='reference_code' placeholder='Эталонный код (правильное решение)'></textarea>
       <textarea name='expected_output' placeholder='Ожидаемый результат (если отличается от результата эталонного кода)'></textarea>
+      <input type='number' name='time_limit' min='1' value='2' placeholder='Лимит времени (секунды)' />
+      <input type='number' name='memory_limit' min='8' value='256' placeholder='Лимит памяти (MB)' />
+      <input type='hidden' name='tests_json' id='tests_json' value='[]' />
+      <div id='tests_builder' style='display:none; border:1px solid #ddd; border-radius:8px; padding:12px; background:#fafafa;'>
+        <h4 style='margin:0 0 10px 0;'>Тесты</h4>
+        <textarea id='test_input' placeholder='Входные данные теста'></textarea>
+        <textarea id='test_expected' placeholder='Ожидаемый вывод'></textarea>
+        <button type='button' onclick='addTest()'>Добавить тест</button>
+        <ul id='tests_list' style='margin-top:10px;'></ul>
+      </div>
       <select name='language_id' required>
          <option value='71'>Python (3.8.1)</option>
          <option value='62'>Java</option>
@@ -293,6 +342,39 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
       </select>
       <button type='submit'>Опубликовать задание</button>
     </form>
+    <script>
+      const codeCheckbox = document.getElementById('is_code_assignment');
+      const testsBuilder = document.getElementById('tests_builder');
+      const testsList = document.getElementById('tests_list');
+      const testsJsonInput = document.getElementById('tests_json');
+      const testsData = [];
+
+      function renderTests() {{
+        testsList.innerHTML = testsData.map((test, index) => `
+          <li style='margin:6px 0;'>
+            <strong>Тест ${{index + 1}}</strong><br/>
+            <small>stdin:</small> <pre>${{(test.input || '').replace(/</g, '&lt;')}}</pre>
+            <small>expected:</small> <pre>${{(test.expected_output || '').replace(/</g, '&lt;')}}</pre>
+          </li>
+        `).join('');
+        testsJsonInput.value = JSON.stringify(testsData);
+      }}
+
+      function addTest() {{
+        const inputEl = document.getElementById('test_input');
+        const expectedEl = document.getElementById('test_expected');
+        const inputValue = inputEl.value || '';
+        const expectedValue = expectedEl.value || '';
+        testsData.push({{ input: inputValue, expected_output: expectedValue }});
+        inputEl.value = '';
+        expectedEl.value = '';
+        renderTests();
+      }}
+
+      codeCheckbox.addEventListener('change', function() {{
+        testsBuilder.style.display = this.checked ? 'block' : 'none';
+      }});
+    </script>
     <h2>Список заданий и ответы студентов</h2>
     <ul>{''.join(assignment_items) or '<li class="card">Заданий пока нет. Создайте первое!</li>'}</ul>
     </body></html>
@@ -307,6 +389,10 @@ def add_assignment(
     reference_code: str = Form(""),
     expected_output: str = Form(""),
     language_id: int = Form(...),
+    is_code_assignment: Optional[str] = Form(None),
+    tests_json: str = Form("[]"),
+    time_limit: int = Form(2),
+    memory_limit: int = Form(256),
     db: Session = Depends(get_db)
 ):
     """Add new assignment (teacher only)"""
@@ -317,13 +403,20 @@ def add_assignment(
     if not user_id:
         return RedirectResponse(url="/")
     
+    tests = parse_tests_json(tests_json)
+    code_assignment_enabled = is_code_assignment == "on"
+
     assignment = Assignment(
         teacher_id=user_id,
         title=title,
         description=description,
         reference_code=reference_code,
         expected_output=expected_output,
-        language_id=language_id
+        language_id=language_id,
+        is_code_assignment=code_assignment_enabled,
+        tests=tests if code_assignment_enabled else None,
+        time_limit=max(1, time_limit),
+        memory_limit=max(8, memory_limit),
     )
     db.add(assignment)
     db.commit()
@@ -352,9 +445,7 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     
     cards = []
     for a in assignments:
-        # Get language name from ID
-        language_names = {71: "Python", 62: "Java", 54: "C++", 63: "JavaScript"}
-        language_name = language_names.get(a.language_id, "Unknown")
+        language_name = LANGUAGE_ID_TO_NAME.get(a.language_id, "Unknown")
         
         reference_code_display = ""
         
@@ -396,18 +487,41 @@ def student_page(request: Request, db: Session = Depends(get_db)):
             </div>
             """
         
-        cards.append(f"""
-        <li class='card'>
-          <h3>{html.escape(a.title)}</h3>
-          <p>{html.escape(a.description)}</p>
-          <p><strong>Язык программирования:</strong> <span style='background: #e3f2fd; padding: 2px 8px; border-radius: 4px; font-weight: bold;'>{language_name}</span></p>
-          {reference_code_display}
-          {submission_result_display}
+        submission_form_html = f"""
           <form method='post' action='/student/submissions'>
             <input type='hidden' name='assignment_id' value='{a.id}' />
             <textarea name='code' placeholder='Напишите ваш код здесь...' required style='font-family: monospace; min-height: 150px;'></textarea>
             <button type='submit'>Отправить решение на проверку</button>
           </form>
+        """
+
+        if a.is_code_assignment:
+            submission_form_html = f"""
+              <form onsubmit='submitCode(event, {a.id}, this)'>
+                <input type='hidden' name='assignment_id' value='{a.id}' />
+                <label>Язык:
+                  <select name='language' required>
+                    <option value='python'>Python</option>
+                    <option value='cpp'>C++</option>
+                    <option value='java'>Java</option>
+                    <option value='javascript'>JavaScript</option>
+                  </select>
+                </label>
+                <textarea name='code' placeholder='Напишите ваш код здесь...' required style='font-family: monospace; min-height: 200px;'></textarea>
+                <button type='submit'>Запустить автопроверку</button>
+                <div class='code-submit-result' style='margin-top:10px;'></div>
+              </form>
+            """
+
+        cards.append(f"""
+        <li class='card'>
+          <h3>{html.escape(a.title)}</h3>
+          <p>{html.escape(a.description)}</p>
+          <p><strong>Тип:</strong> {'Кодинг' if a.is_code_assignment else 'Текстовое'}</p>
+          <p><strong>Язык программирования:</strong> <span style='background: #e3f2fd; padding: 2px 8px; border-radius: 4px; font-weight: bold;'>{language_name}</span></p>
+          {reference_code_display}
+          {submission_result_display}
+          {submission_form_html}
         </li>
         """)
     
@@ -425,8 +539,6 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     // Initialize monitoring when page loads
     function initializeMonitoring() {{
         console.log('Student activity monitoring initialized');
-        
-        // Warn student about monitoring
         console.info('⚠️ Academic integrity monitoring is active on this session');
     }}
     
@@ -468,28 +580,55 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     // Send activity log to server
     function logActivity(activityType, description) {{
         console.log('Activity:', activityType, '-', description);
-        
-        // Only send suspicious activities immediately to server
         const isSuspicious = (activityType === 'focus_lost' || activityType === 'tab_hidden');
-        if (isSuspicious) {{
-            const formData = new FormData();
-            formData.append('activity_type', activityType);
-            formData.append('description', description);
-            if (currentSubmissionId) {{
-                formData.append('submission_id', currentSubmissionId);
+        if (!isSuspicious) return;
+        const formData = new FormData();
+        formData.append('activity_type', activityType);
+        formData.append('description', description);
+        if (currentSubmissionId) {{
+            formData.append('submission_id', currentSubmissionId);
+        }}
+
+        fetch('/api/activity', {{
+            method: 'POST',
+            body: formData
+        }})
+        .then(r => r.json())
+        .then(data => {{
+            if (data.status === 'ok') {{
+                console.log('✓ Activity logged on server');
             }}
-            
-            fetch('/api/activity', {{
+        }})
+        .catch(e => console.error('Error logging activity:', e));
+    }}
+
+    async function submitCode(event, assignmentId, formElement) {{
+        event.preventDefault();
+        const resultBox = formElement.querySelector('.code-submit-result');
+        resultBox.innerHTML = "Проверка...";
+        try {{
+            const formData = new FormData(formElement);
+            const payload = {{
+                assignment_id: assignmentId,
+                language: formData.get('language'),
+                code: formData.get('code')
+            }};
+            const response = await fetch('/submit_code', {{
                 method: 'POST',
-                body: formData
-            }})
-            .then(r => r.json())
-            .then(data => {{
-                if (data.status === 'ok') {{
-                    console.log('✓ Activity logged on server');
-                }}
-            }})
-            .catch(e => console.error('Error logging activity:', e));
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }});
+            const data = await response.json();
+            const escapedDetails = (data.details || '').replace(/</g, '&lt;');
+            resultBox.innerHTML = `
+                <div style="padding:10px; border-radius:8px; background:#f5f5f5;">
+                    <strong>Вердикт:</strong> ${{data.verdict}}<br/>
+                    <strong>Пройдено:</strong> ${{data.tests_passed}} / ${{data.total_tests}}<br/>
+                    <small>${{escapedDetails}}</small>
+                </div>
+            `;
+        }} catch (error) {{
+            resultBox.innerHTML = "<span style='color:#c62828;'>Ошибка отправки решения</span>";
         }}
     }}
     
@@ -500,122 +639,201 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     """
 
 
+def resolve_language_id(language: Optional[str], default_language_id: int) -> int:
+    """Resolve language text (python/cpp/java/javascript) to Judge0 language_id."""
+    if not language:
+        return default_language_id
+    normalized = language.strip().lower()
+    if normalized in LANGUAGE_NAME_TO_ID:
+        return LANGUAGE_NAME_TO_ID[normalized]
+    if normalized.isdigit():
+        return int(normalized)
+    return default_language_id
+
+
+def evaluate_and_store_submission(
+    db: Session,
+    assignment: Assignment,
+    student_id: int,
+    code: str,
+    language_id: int,
+) -> tuple[Submission, dict]:
+    """Evaluate and persist a submission, returning DB row and API payload."""
+    submission = Submission(
+        assignment_id=assignment.id,
+        student_id=student_id,
+        code=code,
+        language_id=language_id,
+        status=SubmissionStatus.PENDING.value,
+    )
+    db.add(submission)
+    db.commit()
+    db.refresh(submission)
+
+    if assignment.is_code_assignment:
+        tests = assignment.tests or []
+        evaluation = evaluate_code_with_tests(
+            source_code=code,
+            language_id=language_id,
+            tests=tests,
+            time_limit=assignment.time_limit or 2,
+            memory_limit=assignment.memory_limit or 256,
+        )
+
+        verdict = evaluation.get("verdict", SubmissionStatus.ERROR.value)
+        failed_test_number = evaluation.get("failed_test_number")
+        test_results = evaluation.get("test_results") or []
+        last_result = test_results[-1] if test_results else {}
+        status = SubmissionStatus.ACCEPTED.value if verdict == "Accepted" else verdict
+
+        submission.status = status
+        submission.verdict = verdict
+        submission.failed_test_number = failed_test_number
+        submission.failed_test = failed_test_number
+        submission.tests_passed = evaluation.get("tests_passed", 0)
+        submission.total_tests = evaluation.get("total_tests", len(tests))
+        submission.test_results = test_results
+        submission.stdout = last_result.get("actual_output", "")
+        submission.stderr = last_result.get("stderr", "")
+        submission.time_used = float(last_result.get("time") or 0)
+        submission.evaluated_at = datetime.utcnow()
+        db.commit()
+
+        details = verdict
+        if failed_test_number:
+            details = f"{verdict}. Failed test: {failed_test_number}"
+        return submission, {
+            "verdict": verdict,
+            "details": details,
+            "tests_passed": evaluation.get("tests_passed", 0),
+            "total_tests": evaluation.get("total_tests", len(tests)),
+        }
+
+    # Legacy single-output path (non-code assignments)
+    reference_output = ""
+    has_expected_output = False
+    if assignment.reference_code:
+        reference_result = evaluate_submission(
+            assignment.reference_code,
+            assignment.language_id,
+            "",
+            "",
+        )
+        reference_output = reference_result.get("stdout", "")
+        if reference_result["status"] != SubmissionStatus.ACCEPTED.value and assignment.expected_output:
+            reference_output = assignment.expected_output
+        has_expected_output = True
+    elif assignment.expected_output:
+        reference_output = assignment.expected_output
+        has_expected_output = True
+
+    result = evaluate_submission(
+        code,
+        assignment.language_id,
+        reference_output if reference_output else (assignment.expected_output or ""),
+        "",
+    )
+    if not has_expected_output and result["status"] == SubmissionStatus.ACCEPTED.value:
+        result["status"] = SubmissionStatus.PENDING.value
+
+    submission.status = result["status"]
+    submission.verdict = result["status"]
+    submission.stdout = result.get("stdout", "")
+    submission.stderr = result.get("stderr", "")
+    submission.judge0_token = result.get("token")
+    submission.evaluated_at = datetime.utcnow()
+    db.commit()
+
+    return submission, {
+        "verdict": result["status"],
+        "details": result["status"],
+        "tests_passed": 0,
+        "total_tests": 0,
+    }
+
+
+@app.post("/submit_code")
+async def submit_code(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """JSON API for code autograding by tests."""
+    if request.session.get("role") != "student":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = await request.json()
+    assignment_id = int(payload.get("assignment_id", 0))
+    code = str(payload.get("code", "")).strip()
+    language = str(payload.get("language", "")).strip()
+    student_id = request.session.get("user_id")
+
+    if not student_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not assignment_id or not code:
+        raise HTTPException(status_code=400, detail="assignment_id and code are required")
+
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+
+    language_id = resolve_language_id(language, assignment.language_id)
+
+    try:
+        _, response_payload = evaluate_and_store_submission(
+            db=db,
+            assignment=assignment,
+            student_id=student_id,
+            code=code,
+            language_id=language_id,
+        )
+        return JSONResponse(response_payload)
+    except Exception as exc:
+        logger.error(f"submit_code failed: {str(exc)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Code evaluation failed")
+
+
 @app.post("/student/submissions")
 def submit_solution(
     request: Request,
     assignment_id: int = Form(...),
     code: str = Form(...),
+    language: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    """Submit code solution for evaluation (student only)"""
+    """Submit code solution for evaluation (student only)."""
     if request.session.get("role") != "student":
         return RedirectResponse(url="/")
-    
+
     user_id = request.session.get("user_id")
     if not user_id:
         return RedirectResponse(url="/")
-    
+
+    if not code or not code.strip():
+        logger.warning(f"Empty submission from user {user_id}")
+        return RedirectResponse(url="/student", status_code=303)
+
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        logger.warning(f"Invalid assignment {assignment_id} from user {user_id}")
+        return RedirectResponse(url="/student", status_code=303)
+
+    language_id = resolve_language_id(language, assignment.language_id)
+
     try:
-        # Validate code is not empty
-        if not code or not code.strip():
-            logger.warning(f"Empty submission from user {user_id}")
-            return RedirectResponse(url="/student", status_code=303)
-        
-        # Get assignment
-        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
-        if not assignment:
-            logger.warning(f"Invalid assignment {assignment_id} from user {user_id}")
-            return RedirectResponse(url="/student", status_code=303)
-        
-        # Create submission with pending status
-        submission = Submission(
-            assignment_id=assignment_id,
+        evaluate_and_store_submission(
+            db=db,
+            assignment=assignment,
             student_id=user_id,
             code=code,
-            status=SubmissionStatus.PENDING.value
+            language_id=language_id,
         )
-        db.add(submission)
-        db.commit()
-        db.refresh(submission)
-        
-        logger.info(f"Submission {submission.id} created for user {user_id}, assignment {assignment_id}")
-        
-        # Evaluate code using Judge0
-        try:
-            # First, execute the reference code to get the expected output
-            reference_output = ""
-            reference_has_error = False
-            has_expected_output = False  # Track if we have a valid expected output for comparison
-            if assignment.reference_code:
-                logger.info(f"Evaluating reference code for assignment {assignment_id}")
-                reference_result = evaluate_submission(
-                    assignment.reference_code,
-                    assignment.language_id,
-                    "",
-                    ""
-                )
-                reference_output = reference_result.get("stdout", "")
-                
-                # If reference code has errors, log it but still try to use expected_output if available
-                if reference_result["status"] != SubmissionStatus.ACCEPTED.value:
-                    logger.warning(f"Reference code evaluation failed: {reference_result['status']}")
-                    reference_has_error = True
-                    # If reference code fails, fall back to expected_output if available
-                    if assignment.expected_output:
-                        reference_output = assignment.expected_output
-                
-                has_expected_output = True
-            elif assignment.expected_output:
-                reference_output = assignment.expected_output
-                has_expected_output = True
-            
-            # Now evaluate the student's code
-            result = evaluate_submission(
-                code,
-                assignment.language_id,
-                reference_output if reference_output else (assignment.expected_output or ""),
-                ""
-            )
-            
-            # Check if output matches the reference/expected output
-            # Judge0 has already compared outputs against expected_output if provided
-            # Only validate if we have expected output to compare against
-            if has_expected_output:
-                # Judge0 has already performed the comparison and set the correct status
-                # (e.g., "Accepted" if output matches, "Wrong Answer" if it doesn't)
-                # Trust Judge0's verdict without override
-                pass
-            else:
-                # No expected output available for validation
-                # Don't mark as Accepted just because code compiled
-                if result["status"] == SubmissionStatus.ACCEPTED.value:
-                    # Mark as Pending since we can't validate without expected output
-                    result["status"] = SubmissionStatus.PENDING.value
-            
-            # Update submission with results
-            submission.status = result["status"]
-            submission.stdout = result.get("stdout", "")
-            submission.stderr = result.get("stderr", "")
-            submission.judge0_token = result.get("token")
-            submission.evaluated_at = datetime.utcnow()
-            
-            logger.info(f"Submission {submission.id} evaluated: {result['status']}")
-        except Exception as e:
-            logger.error(f"Judge0 evaluation error: {str(e)}", exc_info=True)
-            submission.status = SubmissionStatus.ERROR.value
-            submission.stderr = f"Evaluation service error: {str(e)}"
-            submission.evaluated_at = datetime.utcnow()
-        
-        db.commit()
-        
-    except Exception as e:
-        logger.error(f"Error during submission: {str(e)}", exc_info=True)
-        # Try to rollback if something went wrong
+    except Exception as exc:
+        logger.error(f"Error during submission: {str(exc)}", exc_info=True)
         try:
             db.rollback()
-        except:
+        except Exception:
             pass
-    
+
     return RedirectResponse(url="/student", status_code=303)
 
 
