@@ -2,11 +2,36 @@
 import os
 import requests
 import time
+import logging
 from typing import Optional, Dict, Any
 from models import SubmissionStatus
 
 JUDGE0_URL = os.getenv("JUDGE0_URL", "http://judge0:2358")
-JUDGE0_TIMEOUT = 30  # seconds
+JUDGE0_REQUEST_TIMEOUT = 10  # seconds - timeout for individual HTTP requests
+JUDGE0_POLLING_TIMEOUT = 30  # seconds - total timeout for polling
+JUDGE0_HEALTH_TIMEOUT = 5  # seconds - timeout for health check
+
+logger = logging.getLogger(__name__)
+
+
+
+def check_judge0_health() -> bool:
+    """
+    Check if Judge0 is accessible and healthy.
+    Returns True if Judge0 is running, False otherwise.
+    """
+    try:
+        url = f"{JUDGE0_URL}/health"
+        response = requests.get(url, timeout=JUDGE0_HEALTH_TIMEOUT)
+        is_healthy = response.status_code == 200
+        if is_healthy:
+            logger.debug("Judge0 health check passed")
+        else:
+            logger.warning(f"Judge0 health check failed with status {response.status_code}")
+        return is_healthy
+    except Exception as e:
+        logger.error(f"Judge0 health check failed: {e}")
+        return False
 
 
 def submit_code_to_judge0(
@@ -32,30 +57,58 @@ def submit_code_to_judge0(
             "memory_limit": memory_limit,
         }
         
-        response = requests.post(url, json=payload, timeout=JUDGE0_TIMEOUT)
+        response = requests.post(url, json=payload, timeout=JUDGE0_REQUEST_TIMEOUT)
         response.raise_for_status()
         
         data = response.json()
-        return data.get("token")
+        token = data.get("token")
+        if token:
+            logger.debug(f"Successfully submitted code to Judge0, token: {token}")
+        else:
+            logger.warning(f"No token in Judge0 response: {data}")
+        return token
     except Exception as e:
-        print(f"Error submitting code to Judge0: {e}")
+        logger.error(f"Error submitting code to Judge0: {e}")
         return None
+
+
 
 
 def get_judge0_result(token: str) -> Dict[str, Any]:
     """
     Get the result of a Judge0 submission by token.
     Returns dict with status, stdout, stderr, etc.
+    
+    Handles both API response formats:
+    - status as nested object: {"status": {"id": 3, "description": "Accepted"}}
+    - status as integer: {"status": 3}
     """
     try:
         url = f"{JUDGE0_URL}/submissions/{token}?base64=false"
-        response = requests.get(url, timeout=JUDGE0_TIMEOUT)
+        response = requests.get(url, timeout=JUDGE0_REQUEST_TIMEOUT)
         response.raise_for_status()
         
         data = response.json()
+        logger.debug(f"Judge0 response for token {token}: {data}")
+        
+        # Handle both possible response formats for status
+        status_id = None
+        status_desc = "Unknown"
+        
+        status_obj = data.get("status")
+        if isinstance(status_obj, dict):
+            # Status is an object: {"id": 3, "description": "Accepted"}
+            status_id = status_obj.get("id")
+            status_desc = status_obj.get("description", "Unknown")
+        elif isinstance(status_obj, int):
+            # Status is an integer: 3
+            status_id = status_obj
+            # Description will be determined by map_judge0_status
+            status_desc = "Unknown"
+        
         return {
-            "status_id": data.get("status", {}).get("id"),
-            "status_desc": data.get("status", {}).get("description", "Unknown"),
+            "status_id": status_id,
+            "status_desc": status_desc,
             "stdout": data.get("stdout", ""),
             "stderr": data.get("stderr", ""),
             "time": data.get("time", "0"),
@@ -63,8 +116,10 @@ def get_judge0_result(token: str) -> Dict[str, Any]:
             "compile_output": data.get("compile_output", ""),
         }
     except Exception as e:
-        print(f"Error getting Judge0 result: {e}")
+        logger.error(f"Error getting Judge0 result for token {token}: {e}")
         return {}
+
+
 
 
 def wait_for_judge0_result(
@@ -75,21 +130,40 @@ def wait_for_judge0_result(
     """
     Poll Judge0 until submission is complete.
     Returns the result or empty dict if timeout.
+    
+    Status IDs: 1=In Queue, 2=Processing, 3=Accepted, 4=Wrong Answer, etc.
     """
     start_time = time.time()
+    poll_count = 0
     
     while time.time() - start_time < max_wait:
         result = get_judge0_result(token)
+        poll_count += 1
         
-        if result.get("status_id") is not None:
-            status_id = result["status_id"]
-            # Status IDs: 1=In Queue, 2=Processing, 3=Accepted, 4=Wrong Answer, etc.
-            if status_id not in [1, 2]:  # Not in queue or processing
+        # Check if we got a valid response
+        if result:
+            status_id = result.get("status_id")
+            
+            # If status_id is None, the API didn't return a status yet
+            if status_id is None:
+                logger.debug(f"Poll #{poll_count}: No status_id yet, continuing...")
+                time.sleep(poll_interval)
+                continue
+            
+            # Status IDs 1 and 2 mean still processing
+            if status_id not in [1, 2]:
+                logger.info(f"Poll #{poll_count}: Got final status {status_id}")
                 return result
+            
+            logger.debug(f"Poll #{poll_count}: Still processing (status {status_id})")
+        else:
+            logger.debug(f"Poll #{poll_count}: Empty response from Judge0, retrying...")
         
         time.sleep(poll_interval)
     
+    logger.warning(f"Polling timeout after {poll_count} attempts and {max_wait}s")
     return {}
+
 
 
 def map_judge0_status(status_id: Optional[int], status_desc: str) -> str:
@@ -134,6 +208,7 @@ def map_judge0_status(status_id: Optional[int], status_desc: str) -> str:
     return status_map.get(status_id, SubmissionStatus.ERROR.value)
 
 
+
 def evaluate_submission(
     source_code: str,
     language_id: int,
@@ -146,6 +221,16 @@ def evaluate_submission(
     Evaluate code using Judge0 API (real implementation).
     Returns dict with status and output information.
     """
+    # Check Judge0 health before submitting
+    if not check_judge0_health():
+        logger.error("Judge0 is not healthy, cannot evaluate submission")
+        return {
+            "status": SubmissionStatus.ERROR.value,
+            "stdout": "",
+            "stderr": "Judge0 service is unavailable",
+            "token": None,
+        }
+    
     token = submit_code_to_judge0(source_code, language_id, expected_output, stdin, time_limit, memory_limit)
     
     if not token:
@@ -156,13 +241,14 @@ def evaluate_submission(
             "token": None,
         }
     
-    result = wait_for_judge0_result(token)
+    result = wait_for_judge0_result(token, max_wait=JUDGE0_POLLING_TIMEOUT)
     
     if not result:
+        logger.warning(f"Polling timeout for token {token}")
         return {
             "status": SubmissionStatus.EVALUATING.value,
             "stdout": "",
-            "stderr": "",
+            "stderr": "Evaluation timeout - still processing",
             "token": token,
         }
     
@@ -177,6 +263,7 @@ def evaluate_submission(
         "time": result.get("time", "0"),
         "memory": result.get("memory", "0"),
     }
+
 
 
 def compare_outputs(actual: str, expected: str) -> bool:
