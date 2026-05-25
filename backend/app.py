@@ -6,6 +6,7 @@ Includes student activity monitoring for academic integrity.
 import html
 import json
 import os
+import re
 import secrets
 from datetime import datetime
 from typing import Optional
@@ -154,6 +155,30 @@ def format_status(status: str) -> tuple[str, str]:
         return "status-error", "✗ " + status
     else:
         return "status-wrong", "✗ " + status
+
+
+def extract_legacy_io_from_description(description: str) -> tuple[str, str]:
+    """Extract legacy stdin/expected output hints from assignment description."""
+    if not description:
+        return "", ""
+
+    normalized = description.replace("\r", "")
+
+    input_match = re.search(
+        r"(?:входные\s+данные|input)\s*[:\-]\s*(.+?)(?=(?:ожидаемый\s+вывод|expected\s+output)\s*[:\-]|$)",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    expected_match = re.search(
+        r"(?:ожидаемый\s+вывод|expected\s+output)\s*[:\-]\s*(.+)$",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    extracted_input = input_match.group(1).strip() if input_match else ""
+    extracted_expected = expected_match.group(1).strip() if expected_match else ""
+
+    return extracted_input, extracted_expected
 
 
 def get_activity_summary(db: Session, submission_id: int) -> dict:
@@ -720,6 +745,10 @@ def evaluate_and_store_submission(
         }
 
     # Legacy single-output path (non-code assignments)
+    parsed_stdin, parsed_expected_output = extract_legacy_io_from_description(assignment.description or "")
+    fallback_expected_output = assignment.expected_output or parsed_expected_output
+    legacy_stdin = parsed_stdin
+
     reference_output = ""
     has_expected_output = False
     if assignment.reference_code:
@@ -727,21 +756,21 @@ def evaluate_and_store_submission(
             assignment.reference_code,
             assignment.language_id,
             "",
-            "",
+            legacy_stdin,
         )
         reference_output = reference_result.get("stdout", "")
-        if reference_result["status"] != SubmissionStatus.ACCEPTED.value and assignment.expected_output:
-            reference_output = assignment.expected_output
-        has_expected_output = True
-    elif assignment.expected_output:
-        reference_output = assignment.expected_output
+        if reference_result["status"] != SubmissionStatus.ACCEPTED.value and fallback_expected_output:
+            reference_output = fallback_expected_output
+        has_expected_output = bool(reference_output.strip())
+    elif fallback_expected_output:
+        reference_output = fallback_expected_output
         has_expected_output = True
 
     result = evaluate_submission(
         code,
         assignment.language_id,
-        reference_output if reference_output else (assignment.expected_output or ""),
-        "",
+        reference_output if reference_output else fallback_expected_output,
+        legacy_stdin,
     )
     if not has_expected_output and result["status"] == SubmissionStatus.ACCEPTED.value:
         result["status"] = SubmissionStatus.PENDING.value
