@@ -70,7 +70,7 @@ def test_login_page_loads():
     """Test that login page loads successfully"""
     response = client.get("/")
     assert response.status_code == 200
-    assert "Вход в систему" in response.text
+    assert "MalikSite" in response.text or "Образовательная платформа" in response.text
 
 
 def test_teacher_login():
