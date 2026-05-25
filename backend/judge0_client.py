@@ -372,9 +372,12 @@ def evaluate_code_with_tests(
     tests: list of dicts with 'input' and 'expected_output' keys
     Returns dict with overall verdict and detailed test results.
     """
+    logger.info("evaluate_code_with_tests called: tests_count=%s language_id=%s", len(tests or []), language_id)
     if not tests:
+        logger.warning("evaluate_code_with_tests: no tests provided")
         return {
             "verdict": "No tests",
+            "details": "No tests configured for this assignment. Ask your teacher to add at least one test (input + expected output) and republish the assignment.",
             "tests_passed": 0,
             "total_tests": 0,
             "failed_test_number": None,
@@ -391,6 +394,13 @@ def evaluate_code_with_tests(
     for test_num, test in enumerate(tests, 1):
         test_input = test.get("input", "")
         expected_output = test.get("expected_output", "")
+        logger.debug(
+            "Running test %s/%s in evaluate_code_with_tests: input_length=%s expected_output_length=%s",
+            test_num,
+            len(tests),
+            len(test_input or ""),
+            len(expected_output or ""),
+        )
         
         # Evaluate code for this test
         result = evaluate_submission(
@@ -450,6 +460,7 @@ def evaluate_code_with_tests(
     
     return {
         "verdict": overall_status,
+        "details": overall_status,
         "tests_passed": tests_passed,
         "total_tests": len(tests),
         "failed_test_number": failed_test_number,

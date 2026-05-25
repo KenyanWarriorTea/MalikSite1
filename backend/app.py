@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+from urllib.parse import quote_plus
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, Form, Request, Depends, HTTPException
@@ -144,6 +145,29 @@ def parse_tests_json(raw_tests: str) -> list[dict]:
     return cleaned
 
 
+def parse_tests_json_with_validation(raw_tests: str) -> tuple[list[dict], bool]:
+    """Parse tests JSON and return (tests, is_valid_json)."""
+    if not raw_tests or not raw_tests.strip():
+        return [], True
+
+    try:
+        parsed = json.loads(raw_tests)
+    except json.JSONDecodeError:
+        return [], False
+
+    if not isinstance(parsed, list):
+        return [], False
+
+    cleaned = []
+    for test in parsed:
+        if not isinstance(test, dict):
+            continue
+        test_input = str(test.get("input", ""))
+        expected_output = str(test.get("expected_output", ""))
+        cleaned.append({"input": test_input, "expected_output": expected_output})
+    return cleaned, True
+
+
 def format_status(status: str) -> tuple[str, str]:
     """Return (CSS class, display text) for submission status"""
     status_lower = status.lower()
@@ -268,6 +292,9 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     
     # Get all assignments by this teacher
     assignments = db.query(Assignment).filter(Assignment.teacher_id == user_id).all()
+    form_error = request.query_params.get("form_error")
+    assignment_saved = request.query_params.get("assignment_saved")
+    tests_saved_count = request.query_params.get("tests_saved_count")
     
     assignment_items = []
     for a in assignments:
@@ -338,11 +365,29 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
             f"</li>"
         )
     
+    form_message = ""
+    if form_error:
+        form_message = (
+            "<div class='result-error' style='margin-bottom:16px;'>"
+            f"{html.escape(form_error)}"
+            "</div>"
+        )
+    elif assignment_saved == "1":
+        tests_count_text = ""
+        if tests_saved_count is not None:
+            tests_count_text = f" Сохранено тестов: {html.escape(tests_saved_count)}."
+        form_message = (
+            "<div class='result-success' style='margin-bottom:16px;'>"
+            f"Задание успешно опубликовано.{tests_count_text}"
+            "</div>"
+        )
+
     return f"""
     <html><body>{UI_STYLES}
     <h1>Панель учителя: {name}</h1>
     <a href='/' class='logout-btn'>Выйти из системы</a>
-    <form method='post' action='/teacher/assignments'>
+    {form_message}
+    <form method='post' action='/teacher/assignments' id='assignment_form'>
       <h2>Добавить задание</h2>
       <input name='title' placeholder='Название задания' required />
       <textarea name='description' placeholder='Описание задания (Что нужно сделать)' required></textarea>
@@ -357,6 +402,8 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         <textarea id='test_input' placeholder='Входные данные теста'></textarea>
         <textarea id='test_expected' placeholder='Ожидаемый вывод'></textarea>
         <button type='button' onclick='addTest()'>Добавить тест</button>
+        <div id='tests_count' style='margin-top:8px; color:#2e7d32; font-weight:bold;'></div>
+        <div id='tests_error' style='margin-top:8px; color:#c62828; font-weight:bold;'></div>
         <ul id='tests_list' style='margin-top:10px;'></ul>
       </div>
       <select name='language_id' required>
@@ -372,7 +419,10 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
       const testsBuilder = document.getElementById('tests_builder');
       const testsList = document.getElementById('tests_list');
       const testsJsonInput = document.getElementById('tests_json');
+      const testsCount = document.getElementById('tests_count');
+      const testsError = document.getElementById('tests_error');
       const testsData = [];
+      const assignmentForm = document.getElementById('assignment_form');
 
       function renderTests() {{
         testsList.innerHTML = testsData.map((test, index) => `
@@ -383,6 +433,7 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
           </li>
         `).join('');
         testsJsonInput.value = JSON.stringify(testsData);
+        testsCount.textContent = testsData.length ? `✅ Добавлено тестов: ${{testsData.length}}` : '';
       }}
 
       function addTest() {{
@@ -393,11 +444,34 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         testsData.push({{ input: inputValue, expected_output: expectedValue }});
         inputEl.value = '';
         expectedEl.value = '';
+        testsError.textContent = '';
         renderTests();
       }}
 
       codeCheckbox.addEventListener('change', function() {{
         testsBuilder.style.display = this.checked ? 'block' : 'none';
+        if (!this.checked) {{
+          testsError.textContent = '';
+        }}
+      }});
+
+      assignmentForm.addEventListener('submit', function(event) {{
+        testsError.textContent = '';
+        if (!codeCheckbox.checked) {{
+          return;
+        }}
+        let parsed = [];
+        try {{
+          parsed = JSON.parse(testsJsonInput.value || '[]');
+        }} catch (_) {{
+          testsError.textContent = '❌ Невалидный JSON тестов. Добавьте тест заново.';
+          event.preventDefault();
+          return;
+        }}
+        if (!Array.isArray(parsed) || parsed.length === 0) {{
+          testsError.textContent = '❌ Для задания с кодом нужен минимум 1 тест.';
+          event.preventDefault();
+        }}
       }});
     </script>
     <h2>Список заданий и ответы студентов</h2>
@@ -428,8 +502,36 @@ def add_assignment(
     if not user_id:
         return RedirectResponse(url="/")
     
-    tests = parse_tests_json(tests_json)
+    tests, tests_json_valid = parse_tests_json_with_validation(tests_json)
     code_assignment_enabled = is_code_assignment == "on"
+    logger.info(
+        "Teacher assignment submission: teacher_id=%s title=%s is_code_assignment=%s tests_json_length=%s tests_json_valid=%s parsed_tests_count=%s",
+        user_id,
+        title,
+        code_assignment_enabled,
+        len(tests_json or ""),
+        tests_json_valid,
+        len(tests),
+    )
+
+    if code_assignment_enabled and not tests_json_valid:
+        error = quote_plus("Невалидный JSON в тестах. Проверьте формат тестов.")
+        logger.warning(
+            "Teacher assignment rejected due to invalid tests_json: teacher_id=%s title=%s raw_tests_json=%r",
+            user_id,
+            title,
+            tests_json,
+        )
+        return RedirectResponse(url=f"/teacher?form_error={error}", status_code=303)
+
+    if code_assignment_enabled and not tests:
+        error = quote_plus("Для задания с кодом добавьте минимум один тест (вход и ожидаемый вывод).")
+        logger.warning(
+            "Teacher assignment rejected because code assignment has no tests: teacher_id=%s title=%s",
+            user_id,
+            title,
+        )
+        return RedirectResponse(url=f"/teacher?form_error={error}", status_code=303)
 
     assignment = Assignment(
         teacher_id=user_id,
@@ -445,8 +547,21 @@ def add_assignment(
     )
     db.add(assignment)
     db.commit()
-    
-    return RedirectResponse(url="/teacher", status_code=303)
+    db.refresh(assignment)
+    stored_tests_count = len(assignment.tests or []) if assignment.is_code_assignment else 0
+    logger.info(
+        "Assignment saved: assignment_id=%s teacher_id=%s is_code_assignment=%s stored_tests_count=%s stored_tests=%s",
+        assignment.id,
+        user_id,
+        assignment.is_code_assignment,
+        stored_tests_count,
+        assignment.tests,
+    )
+
+    return RedirectResponse(
+        url=f"/teacher?assignment_saved=1&tests_saved_count={stored_tests_count}",
+        status_code=303,
+    )
 
 
 @app.get("/student", response_class=HTMLResponse)
@@ -651,6 +766,15 @@ def student_page(request: Request, db: Session = Depends(get_db)):
                 throw new Error(detail);
             }}
             const data = await response.json();
+            if (data.verdict === 'No tests') {{
+                resultBox.innerHTML = `
+                    <div style="padding:10px; border-radius:8px; background:#ffcdd2; color:#c62828;">
+                        <strong>❌ Автопроверка недоступна:</strong> тесты не настроены для этого задания.<br/>
+                        <small>${{(data.details || 'Попросите учителя добавить минимум один тест и переопубликовать задание.').replace(/</g, '&lt;')}}</small>
+                    </div>
+                `;
+                return;
+            }}
             if (data.submission_id) {{
                 currentSubmissionId = data.submission_id;
                  
@@ -781,6 +905,13 @@ def evaluate_and_store_submission(
 
     if assignment.is_code_assignment:
         tests = assignment.tests or []
+        logger.info(
+            "Evaluating code submission with tests: submission_id=%s assignment_id=%s student_id=%s tests_count=%s",
+            submission.id,
+            assignment.id,
+            student_id,
+            len(tests),
+        )
         evaluation = evaluate_code_with_tests(
             source_code=code,
             language_id=language_id,
@@ -794,6 +925,15 @@ def evaluate_and_store_submission(
         test_results = evaluation.get("test_results") or []
         last_result = test_results[-1] if test_results else {}
         status = SubmissionStatus.ACCEPTED.value if verdict == "Accepted" else verdict
+        logger.info(
+            "Evaluation completed: submission_id=%s assignment_id=%s verdict=%s tests_passed=%s total_tests=%s failed_test_number=%s",
+            submission.id,
+            assignment.id,
+            verdict,
+            evaluation.get("tests_passed", 0),
+            evaluation.get("total_tests", len(tests)),
+            failed_test_number,
+        )
 
         submission.status = status
         submission.verdict = verdict
@@ -809,7 +949,7 @@ def evaluate_and_store_submission(
         submission.evaluated_at = datetime.utcnow()
         db.commit()
 
-        details = verdict
+        details = evaluation.get("details") or verdict
         if failed_test_number:
             details = f"{verdict}. Failed test: {failed_test_number}"
         return submission, {
@@ -891,6 +1031,14 @@ async def submit_code(
         raise HTTPException(status_code=404, detail="Assignment not found")
 
     language_id = resolve_language_id(language, assignment.language_id)
+    logger.info(
+        "submit_code request: student_id=%s assignment_id=%s assignment_is_code=%s assignment_tests_count=%s language_id=%s",
+        student_id,
+        assignment_id,
+        assignment.is_code_assignment,
+        len(assignment.tests or []) if assignment.is_code_assignment else 0,
+        language_id,
+    )
 
     try:
         submission, response_payload = evaluate_and_store_submission(
