@@ -171,3 +171,24 @@ def evaluate_submission(
         "time": result.get("time", "0"),
         "memory": result.get("memory", "0"),
     }
+
+
+def compare_outputs(actual: str, expected: str) -> bool:
+    """
+    Compare actual output with expected output.
+    Ignores trailing whitespace differences.
+    """
+    if not actual or not expected:
+        return actual.strip() == expected.strip()
+    
+    actual_lines = actual.strip().split('\n')
+    expected_lines = expected.strip().split('\n')
+    
+    if len(actual_lines) != len(expected_lines):
+        return False
+    
+    for actual_line, expected_line in zip(actual_lines, expected_lines):
+        if actual_line.strip() != expected_line.strip():
+            return False
+    
+    return True

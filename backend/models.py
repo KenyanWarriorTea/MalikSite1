@@ -31,6 +31,7 @@ class Assignment(Base):
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
     expected_output = Column(Text, nullable=True)
+    reference_code = Column(Text, nullable=True)
     language_id = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
