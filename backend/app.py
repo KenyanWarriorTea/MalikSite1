@@ -284,6 +284,7 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
       <input name='title' placeholder='Название задания' required />
       <textarea name='description' placeholder='Описание задания (Что нужно сделать)' required></textarea>
       <textarea name='reference_code' placeholder='Эталонный код (правильное решение)' required></textarea>
+      <textarea name='expected_output' placeholder='Ожидаемый результат (если отличается от результата эталонного кода)'></textarea>
       <select name='language_id' required>
          <option value='71'>Python (3.8.1)</option>
          <option value='62'>Java</option>
@@ -304,6 +305,7 @@ def add_assignment(
     title: str = Form(...),
     description: str = Form(...),
     reference_code: str = Form(""),
+    expected_output: str = Form(""),
     language_id: int = Form(...),
     db: Session = Depends(get_db)
 ):
@@ -320,6 +322,7 @@ def add_assignment(
         title=title,
         description=description,
         reference_code=reference_code,
+        expected_output=expected_output,
         language_id=language_id
     )
     db.add(assignment)
