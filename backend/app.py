@@ -11,13 +11,13 @@ import secrets
 from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, Form, Request, Depends, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
 from database import init_db, get_db
 from models import User, Assignment, Submission, StudentActivity, SubmissionStatus
-from judge0_client import evaluate_submission, evaluate_code_with_tests
+from judge0_client import evaluate_submission, evaluate_code_with_tests, stream_judge0_result
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
 import logging
@@ -629,7 +629,7 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     async function submitCode(event, assignmentId, formElement) {{
         event.preventDefault();
         const resultBox = formElement.querySelector('.code-submit-result');
-        resultBox.innerHTML = "Проверка...";
+        resultBox.innerHTML = "<div style='padding:10px; border-radius:8px; background:#f5f5f5; color:#666;'>📤 Отправка кода на сервер...</div>";
         try {{
             const formData = new FormData(formElement);
             const payload = {{
@@ -653,20 +653,94 @@ def student_page(request: Request, db: Session = Depends(get_db)):
             const data = await response.json();
             if (data.submission_id) {{
                 currentSubmissionId = data.submission_id;
+                 
+                // Start streaming the live output
+                streamSubmissionOutput(data.submission_id, resultBox);
+            }} else {{
+                const escapedDetails = (data.details || '').replace(/</g, '&lt;');
+                resultBox.innerHTML = `
+                    <div style="padding:10px; border-radius:8px; background:#f5f5f5;">
+                        <strong>Вердикт:</strong> ${{data.verdict}}<br/>
+                        <strong>Пройдено:</strong> ${{data.tests_passed}} / ${{data.total_tests}}<br/>
+                        <small>${{escapedDetails}}</small>
+                    </div>
+                `;
             }}
-            const escapedDetails = (data.details || '').replace(/</g, '&lt;');
-            resultBox.innerHTML = `
-                <div style="padding:10px; border-radius:8px; background:#f5f5f5;">
-                    <strong>Вердикт:</strong> ${{data.verdict}}<br/>
-                    <strong>Пройдено:</strong> ${{data.tests_passed}} / ${{data.total_tests}}<br/>
-                    <small>${{escapedDetails}}</small>
-                </div>
-            `;
         }} catch (error) {{
-            resultBox.innerHTML = "<span style='color:#c62828;'>Ошибка отправки решения</span>";
+            resultBox.innerHTML = "<span style='color:#c62828;'>❌ Ошибка отправки решения: " + (error.message || 'неизвестная ошибка') + "</span>";
         }}
     }}
-    
+     
+    function streamSubmissionOutput(submissionId, resultBox) {{
+        resultBox.innerHTML = "<div style='padding:10px; border-radius:8px; background:#f5f5f5; color:#666;'>⏳ Компиляция кода...</div>";
+         
+        const eventSource = new EventSource(`/api/submission-stream/${{submissionId}}`);
+        let outputLines = [];
+         
+        eventSource.onmessage = function(event) {{
+            try {{
+                const update = JSON.parse(event.data);
+                 
+                if (update.type === 'error') {{
+                    resultBox.innerHTML = `<div style='padding:10px; border-radius:8px; background:#ffcdd2; color:#c62828;'>❌ Ошибка: ${{(update.error || 'неизвестная ошибка').replace(/</g, '&lt;')}}</div>`;
+                    eventSource.close();
+                    return;
+                }}
+                 
+                if (update.type === 'status') {{
+                    let displayHtml = `<div style="padding:10px; border-radius:8px; background:#f5f5f5; font-family: monospace; font-size: 12px;">`;
+                     
+                    // Show compilation output
+                    if (update.compile_output) {{
+                        displayHtml += `<div style="margin-bottom:10px;"><strong style='color:#f57c00;'>🔧 Вывод компилятора:</strong><br/>`;
+                        displayHtml += `<pre style="background:#fff; border:1px solid #f57c00; padding:8px; margin:5px 0; overflow-x: auto; max-height: 150px;">${{(update.compile_output || '').replace(/</g, '&lt;')}}</pre></div>`;
+                    }}
+                     
+                    // Show execution output
+                    if (update.stdout) {{
+                        displayHtml += `<div style="margin-bottom:10px;"><strong style='color:#2196F3;'>▶ Вывод программы:</strong><br/>`;
+                        displayHtml += `<pre style="background:#f5f5f5; border:1px solid #2196F3; padding:8px; margin:5px 0; overflow-x: auto; max-height: 150px;">${{(update.stdout || '').replace(/</g, '&lt;')}}</pre></div>`;
+                    }}
+                     
+                    // Show errors
+                    if (update.stderr) {{
+                        displayHtml += `<div style="margin-bottom:10px;"><strong style='color:#f44336;'>⚠ Ошибка выполнения:</strong><br/>`;
+                        displayHtml += `<pre style="background:#ffebee; border:1px solid #f44336; padding:8px; margin:5px 0; overflow-x: auto; max-height: 150px; color:#c62828;">${{(update.stderr || '').replace(/</g, '&lt;')}}</pre></div>`;
+                    }}
+                     
+                    // Show status
+                    let statusText = '🔄 Выполняется...';
+                    let statusColor = '#FFA500';
+                    if (update.status_id === 3) {{ statusText = '✅ Принято'; statusColor = '#4CAF50'; }}
+                    else if (update.status_id === 4) {{ statusText = '❌ Неправильный ответ'; statusColor = '#f44336'; }}
+                    else if (update.status_id === 5) {{ statusText = '⏱ Превышено время выполнения'; statusColor = '#FF6F00'; }}
+                    else if (update.status_id === 6) {{ statusText = '🔴 Ошибка компиляции'; statusColor = '#f44336'; }}
+                    else if (update.status_id >= 7 && update.status_id <= 12) {{ statusText = '⚠ Ошибка выполнения'; statusColor = '#FF6F00'; }}
+                     
+                    displayHtml += `<div style="padding:10px; background:${{statusColor}}15; border-left:4px solid ${{statusColor}};"><strong style="color:${{statusColor}};">Статус: ${{statusText}}</strong>`;
+                    if (update.time) {{ displayHtml += `<br/>⏱ Время: ${{update.time}} сек`; }}
+                    if (update.memory) {{ displayHtml += `<br/>💾 Память: ${{update.memory}} МБ`; }}
+                    displayHtml += `</div>`;
+                     
+                    displayHtml += `</div>`;
+                    resultBox.innerHTML = displayHtml;
+                     
+                    if (update.complete) {{
+                        eventSource.close();
+                    }}
+                }}
+            }} catch (e) {{
+                console.error('Error parsing stream data:', e);
+            }}
+        }};
+         
+        eventSource.onerror = function(event) {{
+            console.error('Stream error:', event);
+            resultBox.innerHTML = "<span style='color:#c62828;'>❌ Ошибка соединения с сервером</span>";
+            eventSource.close();
+        }};
+    }}
+     
     // Initialize on load
     window.addEventListener('load', initializeMonitoring);
     </script>
@@ -731,6 +805,7 @@ def evaluate_and_store_submission(
         submission.stdout = last_result.get("actual_output", "")
         submission.stderr = last_result.get("stderr", "")
         submission.time_used = float(last_result.get("time") or 0)
+        submission.judge0_token = evaluation.get("token")  # Store the first test's token for streaming
         submission.evaluated_at = datetime.utcnow()
         db.commit()
 
@@ -826,10 +901,84 @@ async def submit_code(
             language_id=language_id,
         )
         response_payload["submission_id"] = submission.id
+        # Include judge0_token if available (for SSE streaming)
+        judge0_token = getattr(submission, 'judge0_token', None)
+        if judge0_token:
+            response_payload["judge0_token"] = judge0_token
         return JSONResponse(response_payload)
     except Exception as exc:
         logger.error(f"submit_code failed: {str(exc)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Code evaluation failed")
+
+
+@app.get("/api/submission-stream/{submission_id}")
+async def submission_stream(
+    submission_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Stream real-time compilation and execution output for a submission.
+    Uses Server-Sent Events (SSE) to send updates to the client.
+    """
+    if request.session.get("role") != "student":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    student_id = request.session.get("user_id")
+    if not student_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Get the submission
+    submission = db.query(Submission).filter(
+        Submission.id == submission_id,
+        Submission.student_id == student_id
+    ).first()
+    
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # If there's no judge0_token, send the current stored result and close
+    if not submission.judge0_token:
+        async def event_generator():
+            yield f"data: {json.dumps({'type': 'status', 'status_id': -1, 'status': submission.status, 'compile_output': '', 'stdout': submission.stdout or '', 'stderr': submission.stderr or '', 'complete': True})}\n\n"
+        
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    # Stream the live results from Judge0
+    async def event_generator():
+        logger.info(f"Starting stream for submission {submission_id}, token {submission.judge0_token}")
+        
+        try:
+            for update in stream_judge0_result(
+                token=submission.judge0_token,
+                max_wait=30,
+                poll_interval=0.5
+            ):
+                # Format as Server-Sent Event
+                event_data = {
+                    'type': 'status',
+                    'status_id': update.get('status_id'),
+                    'compile_output': update.get('compile_output', ''),
+                    'stdout': update.get('stdout', ''),
+                    'stderr': update.get('stderr', ''),
+                    'time': update.get('time', '0'),
+                    'memory': update.get('memory', '0'),
+                    'complete': update.get('complete', False),
+                }
+                
+                logger.debug(f"Streaming update: {event_data}")
+                yield f"data: {json.dumps(event_data)}\n\n"
+                
+                if update.get('complete'):
+                    # Update the submission in the database with final result
+                    submission.status = update.get('status_id', -1)
+                    db.commit()
+                    break
+        except Exception as e:
+            logger.error(f"Error in submission stream: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Stream processing error', 'complete': True})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/student/submissions")
