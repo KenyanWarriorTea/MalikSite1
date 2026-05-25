@@ -575,18 +575,19 @@ def submit_solution(
             )
             
             # Check if output matches the reference/expected output
-            # Only do this comparison if we have a reference_output to compare against
-            if has_expected_output and result.get("stdout") is not None:
-                # If student code has compilation or runtime errors, keep that status
-                if result["status"] in [SubmissionStatus.COMPILATION_ERROR.value, SubmissionStatus.RUNTIME_ERROR.value]:
-                    # Keep the error status
-                    pass
-                else:
-                    # Compare outputs
-                    if compare_outputs(result.get("stdout", ""), reference_output):
-                        result["status"] = SubmissionStatus.ACCEPTED.value
-                    else:
-                        result["status"] = SubmissionStatus.WRONG_ANSWER.value
+            # Judge0 has already compared outputs against expected_output if provided
+            # Only validate if we have expected output to compare against
+            if has_expected_output:
+                # Judge0 has already performed the comparison and set the correct status
+                # (e.g., "Accepted" if output matches, "Wrong Answer" if it doesn't)
+                # Trust Judge0's verdict without override
+                pass
+            else:
+                # No expected output available for validation
+                # Don't mark as Accepted just because code compiled
+                if result["status"] == SubmissionStatus.ACCEPTED.value:
+                    # Mark as Pending since we can't validate without expected output
+                    result["status"] = SubmissionStatus.PENDING.value
             
             # Update submission with results
             submission.status = result["status"]
