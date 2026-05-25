@@ -1,37 +1,45 @@
-"""Judge0 API integration for code evaluation"""
-import os
-import requests
-import time
+"""Code evaluation helpers.
+
+Judge0 is kept as a fallback for non-Python languages. Python submissions are
+executed locally inside the backend container because Judge0/isolate can fail on
+some Windows Docker Desktop setups with `/box/script.py` sandbox errors.
+"""
+import base64
 import logging
+import os
+import subprocess
+import sys
+import time
 from typing import Optional, Dict, Any
+
+import requests
+
 from models import SubmissionStatus
 
 JUDGE0_URL = os.getenv("JUDGE0_URL", "http://judge0:2358")
-JUDGE0_REQUEST_TIMEOUT = 10  # seconds - timeout for individual HTTP requests
-JUDGE0_POLLING_TIMEOUT = 30  # seconds - total timeout for polling
-JUDGE0_HEALTH_TIMEOUT = 5  # seconds - timeout for health check
+JUDGE0_REQUEST_TIMEOUT = 10
+JUDGE0_POLLING_TIMEOUT = 30
+JUDGE0_HEALTH_TIMEOUT = 5
+PYTHON_LANGUAGE_IDS = {34, 35, 36, 37, 70, 71}
 
 logger = logging.getLogger(__name__)
 
 
-
 def check_judge0_health() -> bool:
-    """
-    Check if Judge0 is accessible and healthy.
-    Returns True if Judge0 is running, False otherwise.
-    """
-    try:
-        url = f"{JUDGE0_URL}/health"
-        response = requests.get(url, timeout=JUDGE0_HEALTH_TIMEOUT)
-        is_healthy = response.status_code == 200
-        if is_healthy:
-            logger.debug("Judge0 health check passed")
-        else:
-            logger.warning(f"Judge0 health check failed with status {response.status_code}")
-        return is_healthy
-    except Exception as e:
-        logger.error(f"Judge0 health check failed: {e}")
-        return False
+    """Return True when Judge0 responds to a lightweight endpoint."""
+    for endpoint in ("/system_info", "/languages"):
+        try:
+            response = requests.get(f"{JUDGE0_URL}{endpoint}", timeout=JUDGE0_HEALTH_TIMEOUT)
+            if 200 <= response.status_code < 500:
+                return True
+            logger.warning("Judge0 health check %s returned %s", endpoint, response.status_code)
+        except Exception as exc:
+            logger.warning("Judge0 health check %s failed: %s", endpoint, exc)
+    return False
+
+
+def _to_b64(value: str) -> str:
+    return base64.b64encode(str(value or "").encode("utf-8")).decode("ascii")
 
 
 def submit_code_to_judge0(
@@ -42,225 +50,109 @@ def submit_code_to_judge0(
     time_limit: int = 2,
     memory_limit: int = 256,
 ) -> Optional[str]:
-    """
-    Submit code to Judge0 for evaluation.
-    Returns the token for tracking the submission.
-    """
+    """Submit code to Judge0 and return the submission token."""
     try:
-        url = f"{JUDGE0_URL}/submissions"
+        url = f"{JUDGE0_URL}/submissions?base64_encoded=true&wait=false"
+        memory_kb = int(memory_limit) * 1024 if int(memory_limit) < 1024 else int(memory_limit)
         payload = {
-            "language_id": language_id,
-            "source_code": source_code,
-            "expected_output": expected_output,
-            "stdin": stdin,
-            "cpu_time_limit": time_limit,
-            "memory_limit": memory_limit,
+            "language_id": int(language_id),
+            "source_code": _to_b64(source_code),
+            "expected_output": _to_b64(expected_output),
+            "stdin": _to_b64(stdin),
+            "cpu_time_limit": int(time_limit),
+            "memory_limit": memory_kb,
         }
-        
         response = requests.post(url, json=payload, timeout=JUDGE0_REQUEST_TIMEOUT)
         response.raise_for_status()
-        
         data = response.json()
         token = data.get("token")
-        if token:
-            logger.debug(f"Successfully submitted code to Judge0, token: {token}")
-        else:
-            logger.warning(f"No token in Judge0 response: {data}")
+        if not token:
+            logger.warning("No token in Judge0 response: %s", data)
         return token
-    except Exception as e:
-        logger.error(f"Error submitting code to Judge0: {e}")
+    except Exception as exc:
+        logger.error("Error submitting code to Judge0: %s", exc)
         return None
 
 
-
-
 def get_judge0_result(token: str) -> Dict[str, Any]:
-    """
-    Get the result of a Judge0 submission by token.
-    Returns dict with status, stdout, stderr, etc.
-    
-    Handles both API response formats:
-    - status as nested object: {"status": {"id": 3, "description": "Accepted"}}
-    - status as integer: {"status": 3}
-    """
+    """Fetch a Judge0 result by token."""
     try:
-        url = f"{JUDGE0_URL}/submissions/{token}?base64=false"
+        url = f"{JUDGE0_URL}/submissions/{token}?base64_encoded=false"
         response = requests.get(url, timeout=JUDGE0_REQUEST_TIMEOUT)
         response.raise_for_status()
-        
         data = response.json()
-        logger.debug(f"Judge0 response for token {token}: {data}")
-        
-        # Handle both possible response formats for status
+
         status_id = None
         status_desc = "Unknown"
-        
         status_obj = data.get("status")
         if isinstance(status_obj, dict):
-            # Status is an object: {"id": 3, "description": "Accepted"}
             status_id = status_obj.get("id")
             status_desc = status_obj.get("description", "Unknown")
         elif isinstance(status_obj, int):
-            # Status is an integer: 3
             status_id = status_obj
-            # Description will be determined by map_judge0_status
-            status_desc = "Unknown"
-        
+
         return {
             "status_id": status_id,
             "status_desc": status_desc,
-            "stdout": data.get("stdout", ""),
-            "stderr": data.get("stderr", ""),
-            "time": data.get("time", "0"),
-            "memory": data.get("memory", "0"),
-            "compile_output": data.get("compile_output", ""),
+            "stdout": data.get("stdout") or "",
+            "stderr": data.get("stderr") or "",
+            "time": data.get("time") or "0",
+            "memory": data.get("memory") or "0",
+            "compile_output": data.get("compile_output") or data.get("message") or "",
         }
-    except Exception as e:
-        logger.error(f"Error getting Judge0 result for token {token}: {e}")
+    except Exception as exc:
+        logger.error("Error getting Judge0 result for token %s: %s", token, exc)
         return {}
 
 
-
-
-def wait_for_judge0_result(
-    token: str,
-    max_wait: int = 30,
-    poll_interval: float = 0.5,
-) -> Dict[str, Any]:
-    """
-    Poll Judge0 until submission is complete.
-    Returns the result or empty dict if timeout.
-    
-    Status IDs: 1=In Queue, 2=Processing, 3=Accepted, 4=Wrong Answer, etc.
-    """
+def wait_for_judge0_result(token: str, max_wait: int = 30, poll_interval: float = 0.5) -> Dict[str, Any]:
+    """Poll Judge0 until the submission is complete."""
     start_time = time.time()
     poll_count = 0
-    
     while time.time() - start_time < max_wait:
         result = get_judge0_result(token)
         poll_count += 1
-        
-        # Check if we got a valid response
         if result:
             status_id = result.get("status_id")
-            
-            # If status_id is None, the API didn't return a status yet
             if status_id is None:
-                logger.debug(f"Poll #{poll_count}: No status_id yet, continuing...")
                 time.sleep(poll_interval)
                 continue
-            
-            # Status IDs 1 and 2 mean still processing
             if status_id not in [1, 2]:
-                logger.info(f"Poll #{poll_count}: Got final status {status_id}")
+                logger.info("Poll #%s: Got final status %s", poll_count, status_id)
                 return result
-            
-            logger.debug(f"Poll #{poll_count}: Still processing (status {status_id})")
-        else:
-            logger.debug(f"Poll #{poll_count}: Empty response from Judge0, retrying...")
-        
         time.sleep(poll_interval)
-    
-    logger.warning(f"Polling timeout after {poll_count} attempts and {max_wait}s")
+    logger.warning("Polling timeout after %s attempts and %ss", poll_count, max_wait)
     return {}
 
 
-
-def stream_judge0_result(
-    token: str,
-    max_wait: int = 30,
-    poll_interval: float = 0.5,
-):
-    """
-    Stream Judge0 submission results in real-time.
-    Yields updates as the submission progresses through compilation and execution.
-    Yields dict with keys: status_id, compile_output, stdout, stderr, time, memory
-    """
+def stream_judge0_result(token: str, max_wait: int = 30, poll_interval: float = 0.5):
+    """Yield Judge0 result updates for SSE streaming."""
     start_time = time.time()
-    poll_count = 0
-    last_compile_output = ""
-    last_stdout = ""
-    last_stderr = ""
-    
+    last_payload = None
     while time.time() - start_time < max_wait:
         result = get_judge0_result(token)
-        poll_count += 1
-        
-        # Check if we got a valid response
         if result:
             status_id = result.get("status_id")
-            
-            # If status_id is None, the API didn't return a status yet
-            if status_id is None:
-                logger.debug(f"Stream poll #{poll_count}: No status_id yet, continuing...")
-                time.sleep(poll_interval)
-                continue
-            
-            # Yield any new output that appeared
-            current_compile_output = result.get("compile_output", "")
-            current_stdout = result.get("stdout", "")
-            current_stderr = result.get("stderr", "")
-            
-            has_new_output = (
-                current_compile_output != last_compile_output or
-                current_stdout != last_stdout or
-                current_stderr != last_stderr or
-                status_id not in [1, 2]  # Status changed
-            )
-            
-            if has_new_output:
-                logger.debug(f"Stream poll #{poll_count}: Status {status_id}, yielding update")
-                yield {
+            if status_id is not None:
+                payload = {
                     "status_id": status_id,
-                    "compile_output": current_compile_output,
-                    "stdout": current_stdout,
-                    "stderr": current_stderr,
+                    "compile_output": result.get("compile_output", ""),
+                    "stdout": result.get("stdout", ""),
+                    "stderr": result.get("stderr", ""),
                     "time": result.get("time", "0"),
                     "memory": result.get("memory", "0"),
                     "complete": status_id not in [1, 2],
                 }
-                
-                last_compile_output = current_compile_output
-                last_stdout = current_stdout
-                last_stderr = current_stderr
-                
-                # If submission is complete, stop streaming
-                if status_id not in [1, 2]:
-                    logger.info(f"Stream complete: Poll #{poll_count}, status {status_id}")
+                if payload != last_payload:
+                    yield payload
+                    last_payload = payload
+                if payload["complete"]:
                     return
-            
-            logger.debug(f"Stream poll #{poll_count}: Status {status_id}, no new output")
-        else:
-            logger.debug(f"Stream poll #{poll_count}: Empty response from Judge0, retrying...")
-        
         time.sleep(poll_interval)
-    
-    logger.warning(f"Stream timeout after {poll_count} attempts and {max_wait}s")
-    return
 
 
-def map_judge0_status(status_id: Optional[int], status_desc: str) -> str:
-    """
-    Map Judge0 status ID and description to our status enum.
-    Judge0 Status codes:
-    1 - In Queue
-    2 - Processing
-    3 - Accepted
-    4 - Wrong Answer
-    5 - Time Limit Exceeded
-    6 - Compilation Error
-    7 - Runtime Error (SIGSEGV)
-    8 - Runtime Error (SIGXFSZ)
-    9 - Runtime Error (SIGFPE)
-    10 - Runtime Error (SIGABRT)
-    11 - Runtime Error (NZEC)
-    12 - Runtime Error (Other)
-    13 - Internal Error
-    14 - Exec Format Error
-    """
-    if status_id is None:
-        return SubmissionStatus.ERROR.value
-    
+def map_judge0_status(status_id: Optional[int], status_desc: str = "") -> str:
+    """Map Judge0 status ID to the app status enum."""
     status_map = {
         1: SubmissionStatus.PENDING.value,
         2: SubmissionStatus.EVALUATING.value,
@@ -277,9 +169,59 @@ def map_judge0_status(status_id: Optional[int], status_desc: str) -> str:
         13: SubmissionStatus.ERROR.value,
         14: SubmissionStatus.ERROR.value,
     }
-    
     return status_map.get(status_id, SubmissionStatus.ERROR.value)
 
+
+def evaluate_python_locally(
+    source_code: str,
+    stdin: str = "",
+    time_limit: int = 2,
+    memory_limit: int = 256,
+) -> Dict[str, Any]:
+    """Evaluate a Python submission inside the backend container."""
+    start = time.time()
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", str(source_code or "")],
+            input=str(stdin or ""),
+            text=True,
+            capture_output=True,
+            timeout=max(1, int(time_limit)),
+        )
+        elapsed = round(time.time() - start, 3)
+        if completed.returncode == 0:
+            status = SubmissionStatus.ACCEPTED.value
+        else:
+            status = SubmissionStatus.RUNTIME_ERROR.value
+        return {
+            "status": status,
+            "stdout": completed.stdout or "",
+            "stderr": completed.stderr or "",
+            "compile_output": "",
+            "token": None,
+            "time": str(elapsed),
+            "memory": "0",
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": SubmissionStatus.TIME_LIMIT_EXCEEDED.value,
+            "stdout": exc.stdout or "",
+            "stderr": "Time limit exceeded",
+            "compile_output": "",
+            "token": None,
+            "time": str(time_limit),
+            "memory": "0",
+        }
+    except Exception as exc:
+        return {
+            "status": SubmissionStatus.ERROR.value,
+            "stdout": "",
+            "stderr": str(exc),
+            "compile_output": "",
+            "token": None,
+            "time": "0",
+            "memory": "0",
+        }
 
 
 def evaluate_submission(
@@ -290,11 +232,10 @@ def evaluate_submission(
     time_limit: int = 2,
     memory_limit: int = 256,
 ) -> Dict[str, Any]:
-    """
-    Evaluate code using Judge0 API (real implementation).
-    Returns dict with status and output information.
-    """
-    # Check Judge0 health before submitting
+    """Evaluate code using local Python execution or Judge0 fallback."""
+    if int(language_id) in PYTHON_LANGUAGE_IDS:
+        return evaluate_python_locally(source_code, stdin, time_limit, memory_limit)
+
     if not check_judge0_health():
         logger.error("Judge0 is not healthy, cannot evaluate submission")
         return {
@@ -303,9 +244,8 @@ def evaluate_submission(
             "stderr": "Judge0 service is unavailable",
             "token": None,
         }
-    
+
     token = submit_code_to_judge0(source_code, language_id, expected_output, stdin, time_limit, memory_limit)
-    
     if not token:
         return {
             "status": SubmissionStatus.ERROR.value,
@@ -313,20 +253,17 @@ def evaluate_submission(
             "stderr": "Failed to submit code to Judge0",
             "token": None,
         }
-    
+
     result = wait_for_judge0_result(token, max_wait=JUDGE0_POLLING_TIMEOUT)
-    
     if not result:
-        logger.warning(f"Polling timeout for token {token}")
         return {
             "status": SubmissionStatus.EVALUATING.value,
             "stdout": "",
             "stderr": "Evaluation timeout - still processing",
             "token": token,
         }
-    
+
     status = map_judge0_status(result.get("status_id"), result.get("status_desc", ""))
-    
     return {
         "status": status,
         "stdout": result.get("stdout", ""),
@@ -338,26 +275,11 @@ def evaluate_submission(
     }
 
 
-
 def compare_outputs(actual: str, expected: str) -> bool:
-    """
-    Compare actual output with expected output.
-    Ignores trailing whitespace differences.
-    """
-    if not actual or not expected:
-        return actual.strip() == expected.strip()
-    
-    actual_lines = actual.strip().split('\n')
-    expected_lines = expected.strip().split('\n')
-    
-    if len(actual_lines) != len(expected_lines):
-        return False
-    
-    for actual_line, expected_line in zip(actual_lines, expected_lines):
-        if actual_line.strip() != expected_line.strip():
-            return False
-    
-    return True
+    """Compare output values while ignoring trailing whitespace."""
+    actual = str(actual or "")
+    expected = str(expected or "")
+    return actual.strip() == expected.strip()
 
 
 def evaluate_code_with_tests(
@@ -367,14 +289,9 @@ def evaluate_code_with_tests(
     time_limit: int = 2,
     memory_limit: int = 256,
 ) -> Dict[str, Any]:
-    """
-    Evaluate code against multiple tests.
-    tests: list of dicts with 'input' and 'expected_output' keys
-    Returns dict with overall verdict and detailed test results.
-    """
+    """Evaluate code against multiple tests."""
     logger.info("evaluate_code_with_tests called: tests_count=%s language_id=%s", len(tests or []), language_id)
     if not tests:
-        logger.warning("evaluate_code_with_tests: no tests provided")
         return {
             "verdict": "No tests",
             "details": "No tests configured for this assignment. Ask your teacher to add at least one test (input + expected output) and republish the assignment.",
@@ -384,80 +301,60 @@ def evaluate_code_with_tests(
             "test_results": [],
             "token": None,
         }
-    
+
     test_results = []
     tests_passed = 0
     failed_test_number = None
-    overall_status = "Accepted"
-    token = None  # Will store the first token for streaming
-    
+    overall_status = SubmissionStatus.ACCEPTED.value
+    token = None
+
     for test_num, test in enumerate(tests, 1):
-        test_input = test.get("input", "")
-        expected_output = test.get("expected_output", "")
-        logger.debug(
-            "Running test %s/%s in evaluate_code_with_tests: input_length=%s expected_output_length=%s",
-            test_num,
-            len(tests),
-            len(test_input or ""),
-            len(expected_output or ""),
-        )
-        
-        # Evaluate code for this test
+        test_input = str(test.get("input", ""))
+        expected_output = str(test.get("expected_output", ""))
         result = evaluate_submission(
-            source_code,
-            language_id,
-            expected_output,
-            test_input,
-            time_limit,
-            memory_limit
+            source_code=source_code,
+            language_id=language_id,
+            expected_output=expected_output,
+            stdin=test_input,
+            time_limit=time_limit,
+            memory_limit=memory_limit,
         )
-        
-        # Store the first token
+
         if token is None and result.get("token"):
             token = result.get("token")
-        
-        actual_output = result.get("stdout", "").strip()
+
+        actual_output = str(result.get("stdout") or "").strip()
         expected_output_stripped = expected_output.strip()
-        
         test_result = {
             "test_number": test_num,
-            "status": result["status"],
+            "status": result.get("status", SubmissionStatus.ERROR.value),
             "input": test_input,
             "expected_output": expected_output,
             "actual_output": actual_output,
-            "stderr": result.get("stderr", ""),
+            "stderr": result.get("stderr") or result.get("compile_output") or "",
             "time": result.get("time", "0"),
             "memory": result.get("memory", "0"),
-            "token": result.get("token"),  # Store token per test
+            "token": result.get("token"),
         }
-        
-        # Check if output matches (only if no errors)
-        if result["status"] == SubmissionStatus.ACCEPTED.value:
-            if compare_outputs(actual_output, expected_output_stripped):
-                test_result["passed"] = True
-                tests_passed += 1
-            else:
-                test_result["passed"] = False
-                if failed_test_number is None:
-                    failed_test_number = test_num
-                    overall_status = f"Wrong Answer on test {test_num}"
+
+        if result.get("status") == SubmissionStatus.ACCEPTED.value and compare_outputs(actual_output, expected_output_stripped):
+            test_result["passed"] = True
+            tests_passed += 1
         else:
-            # Compilation or Runtime Error
             test_result["passed"] = False
-            if failed_test_number is None:
-                failed_test_number = test_num
-                overall_status = result["status"]
-        
-        test_results.append(test_result)
-        
-        # Stop on first failure
-        if not test_result.get("passed", False):
+            failed_test_number = test_num
+            if result.get("status") == SubmissionStatus.ACCEPTED.value:
+                overall_status = f"Wrong Answer on test {test_num}"
+            else:
+                overall_status = result.get("status", SubmissionStatus.ERROR.value)
+            test_results.append(test_result)
             break
-    
-    # If all tests passed, set overall status to Accepted
+
+        test_results.append(test_result)
+
     if tests_passed == len(tests):
-        overall_status = "Accepted"
-    
+        overall_status = SubmissionStatus.ACCEPTED.value
+
     return {
         "verdict": overall_status,
         "details": overall_status,
@@ -465,5 +362,5 @@ def evaluate_code_with_tests(
         "total_tests": len(tests),
         "failed_test_number": failed_test_number,
         "test_results": test_results,
-        "token": token,  # Return first token for streaming
+        "token": token,
     }
