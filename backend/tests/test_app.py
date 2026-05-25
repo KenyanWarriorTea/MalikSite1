@@ -4,6 +4,7 @@ import sys
 import os
 import pytest
 import tempfile
+from urllib.parse import urlparse, parse_qs, unquote_plus
 
 # Add backend to path
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -22,7 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 # Import after env setup
 import app as web_app
-from models import Base, Assignment, Submission, SubmissionStatus
+from models import Base, Assignment, Submission, SubmissionStatus, User
 import database
 
 # Override the database to use our test configuration
@@ -263,6 +264,78 @@ def test_teacher_can_create_code_assignment_with_tests():
         db.close()
 
 
+def test_teacher_cannot_create_code_assignment_without_tests():
+    """Code assignments must contain at least one test."""
+    client.post(
+        "/login",
+        data={"name": "TeacherNoTests", "access_code": "teacher123"},
+    )
+    response = client.post(
+        "/teacher/assignments",
+        data={
+            "title": "No tests assignment",
+            "description": "desc",
+            "reference_code": "print(1)",
+            "expected_output": "",
+            "language_id": 71,
+            "is_code_assignment": "on",
+            "tests_json": "[]",
+            "time_limit": 2,
+            "memory_limit": 256,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/teacher?form_error=" in response.headers["location"]
+
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    message = unquote_plus(query["form_error"][0])
+    assert "минимум один тест" in message
+
+    db = database.SessionLocal()
+    try:
+        assignment = db.query(Assignment).filter(Assignment.title == "No tests assignment").first()
+        assert assignment is None
+    finally:
+        db.close()
+
+
+def test_teacher_cannot_create_code_assignment_with_invalid_tests_json():
+    """Invalid tests_json should be rejected for code assignments."""
+    client.post(
+        "/login",
+        data={"name": "TeacherBadJson", "access_code": "teacher123"},
+    )
+    response = client.post(
+        "/teacher/assignments",
+        data={
+            "title": "Invalid JSON tests",
+            "description": "desc",
+            "reference_code": "print(1)",
+            "expected_output": "",
+            "language_id": 71,
+            "is_code_assignment": "on",
+            "tests_json": "{bad json",
+            "time_limit": 2,
+            "memory_limit": 256,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/teacher?form_error=" in response.headers["location"]
+
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    message = unquote_plus(query["form_error"][0])
+    assert "Невалидный JSON" in message
+
+    db = database.SessionLocal()
+    try:
+        assignment = db.query(Assignment).filter(Assignment.title == "Invalid JSON tests").first()
+        assert assignment is None
+    finally:
+        db.close()
+
+
 def test_submit_code_api_returns_json_result(monkeypatch):
     """Code submission API returns structured verdict payload"""
     # Create assignment as teacher
@@ -316,6 +389,53 @@ def test_submit_code_api_returns_json_result(monkeypatch):
     assert response.json()["tests_passed"] == 1
     assert response.json()["total_tests"] == 1
     assert response.json()["submission_id"] == 123
+
+
+def test_submit_code_api_no_tests_returns_helpful_message():
+    """Student gets guidance when assignment has no tests configured."""
+    client.post(
+        "/login",
+        data={"name": "TeacherNoTestsAPI", "access_code": "teacher123"},
+    )
+    db = database.SessionLocal()
+    try:
+        teacher = db.query(User).filter(User.name == "TeacherNoTestsAPI").first()
+        assert teacher is not None
+        assignment = Assignment(
+            teacher_id=teacher.id,
+            title="Broken code assignment",
+            description="desc",
+            reference_code="print(1)",
+            expected_output="",
+            language_id=71,
+            is_code_assignment=True,
+            tests=None,
+            time_limit=2,
+            memory_limit=256,
+        )
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+        assignment_id = assignment.id
+    finally:
+        db.close()
+
+    client.post(
+        "/login",
+        data={"name": "StudentNoTests", "access_code": "student123"},
+    )
+    response = client.post(
+        "/submit_code",
+        json={
+            "assignment_id": assignment_id,
+            "code": "print(1)",
+            "language": "python",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["verdict"] == "No tests"
+    assert "No tests configured for this assignment" in payload["details"]
 
 
 def test_activity_api_without_submission_id_is_ignored():
