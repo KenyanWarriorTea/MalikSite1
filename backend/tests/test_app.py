@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 # Import after env setup
 import app as web_app
-from models import Base, Assignment
+from models import Base, Assignment, Submission, SubmissionStatus
 import database
 
 # Override the database to use our test configuration
@@ -333,3 +333,59 @@ def test_activity_api_without_submission_id_is_ignored():
     )
     assert response.status_code == 200
     assert response.json()["status"] == "ignored"
+
+
+def test_legacy_text_assignment_uses_description_input_and_expected_output(monkeypatch):
+    """Legacy text assignment should parse stdin/expected output from description."""
+    client.post(
+        "/login",
+        data={"name": "Teacher7", "access_code": "teacher123"},
+    )
+    client.post(
+        "/teacher/assignments",
+        data={
+            "title": "Square Number",
+            "description": "Найдите квадрат числа. Входные данные: 5 Ожидаемый вывод: 25",
+            "reference_code": "",
+            "expected_output": "",
+            "language_id": 71,
+        },
+    )
+
+    client.post(
+        "/login",
+        data={"name": "Student7", "access_code": "student123"},
+    )
+
+    def fake_eval_submission(source_code, language_id, expected_output="", stdin="", time_limit=2, memory_limit=256):
+        assert stdin == "5"
+        assert expected_output == "25"
+        return {
+            "status": SubmissionStatus.ACCEPTED.value,
+            "stdout": "25",
+            "stderr": "",
+            "token": "fake-token",
+            "time": "0.01",
+            "memory": "1024",
+        }
+
+    monkeypatch.setattr(web_app, "evaluate_submission", fake_eval_submission)
+
+    response = client.post(
+        "/student/submissions",
+        data={
+            "assignment_id": 1,
+            "code": "n=int(input());print(n*n)",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    db = database.SessionLocal()
+    try:
+        submission = db.query(Submission).first()
+        assert submission is not None
+        assert submission.status == SubmissionStatus.ACCEPTED.value
+        assert submission.stdout == "25"
+    finally:
+        db.close()
