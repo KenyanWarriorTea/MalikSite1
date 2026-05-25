@@ -1,0 +1,7 @@
+# Keep Docker and Judge0 config files with Linux line endings.
+# Judge0 sources judge0.conf inside a Linux container; CRLF breaks it.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+judge0.conf text eol=lf
