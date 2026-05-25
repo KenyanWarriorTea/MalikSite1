@@ -14,11 +14,14 @@ services:
     networks:
       - app-network
     depends_on:
-      - db
-      - judge0
+      db:
+        condition: service_healthy
+      judge0-db:
+        condition: service_started
+    restart: unless-stopped
 
   db:
-    image: postgres:latest
+    image: postgres:15-alpine
     environment:
       POSTGRES_DB: tasks_db
       POSTGRES_USER: user
@@ -32,23 +35,37 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  judge0-db:
+    image: redis:7-alpine
+    networks:
+      - app-network
+    restart: unless-stopped
 
   judge0:
-    image: judge0/judge0
+    image: judge0/judge0:latest
     ports:
       - '2358:2358'
     networks:
       - app-network
     environment:
       REDIS_URL: redis://judge0-db:6379
-
-  judge0-db:
-    image: redis:latest
-    networks:
-      - app-network
+      API_BASE_URL: http://judge0:2358
+      WORKERS: 1
+    depends_on:
+      - judge0-db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2358/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 networks:
   app-network:
+    driver: bridge
 
 volumes:
   db_data:
