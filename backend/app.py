@@ -582,12 +582,11 @@ def student_page(request: Request, db: Session = Depends(get_db)):
         console.log('Activity:', activityType, '-', description);
         const isSuspicious = (activityType === 'focus_lost' || activityType === 'tab_hidden');
         if (!isSuspicious) return;
+        if (!currentSubmissionId) return;
         const formData = new FormData();
         formData.append('activity_type', activityType);
         formData.append('description', description);
-        if (currentSubmissionId) {{
-            formData.append('submission_id', currentSubmissionId);
-        }}
+        formData.append('submission_id', currentSubmissionId);
 
         fetch('/api/activity', {{
             method: 'POST',
@@ -618,7 +617,18 @@ def student_page(request: Request, db: Session = Depends(get_db)):
                 headers: {{ 'Content-Type': 'application/json' }},
                 body: JSON.stringify(payload)
             }});
+            if (!response.ok) {{
+                let detail = `HTTP ${{response.status}}`;
+                try {{
+                    const errData = await response.json();
+                    detail = errData.detail || detail;
+                }} catch (_) {{}}
+                throw new Error(detail);
+            }}
             const data = await response.json();
+            if (data.submission_id) {{
+                currentSubmissionId = data.submission_id;
+            }}
             const escapedDetails = (data.details || '').replace(/</g, '&lt;');
             resultBox.innerHTML = `
                 <div style="padding:10px; border-radius:8px; background:#f5f5f5;">
@@ -779,13 +789,14 @@ async def submit_code(
     language_id = resolve_language_id(language, assignment.language_id)
 
     try:
-        _, response_payload = evaluate_and_store_submission(
+        submission, response_payload = evaluate_and_store_submission(
             db=db,
             assignment=assignment,
             student_id=student_id,
             code=code,
             language_id=language_id,
         )
+        response_payload["submission_id"] = submission.id
         return JSONResponse(response_payload)
     except Exception as exc:
         logger.error(f"submit_code failed: {str(exc)}", exc_info=True)
@@ -849,6 +860,8 @@ def log_activity(
     user_id = request.session.get("user_id")
     if not user_id or request.session.get("role") != "student":
         raise HTTPException(status_code=401, detail="Unauthorized")
+    if not submission_id:
+        return {"status": "ignored"}
     
     # Log the activity
     activity = StudentActivity(
