@@ -354,13 +354,6 @@ def student_page(request: Request, db: Session = Depends(get_db)):
         language_name = language_names.get(a.language_id, "Unknown")
         
         reference_code_display = ""
-        if a.reference_code:
-            reference_code_display = f"""
-            <div style='margin-top: 15px; padding: 15px; background: #f0f8ff; border-radius: 8px; border-left: 4px solid #2196F3;'>
-              <h4 style='margin-top: 0;'>📝 Эталонный код:</h4>
-              <pre style='background: #fff; border: 1px solid #ddd;'>{html.escape(a.reference_code)}</pre>
-            </div>
-            """
         
         # Check if student has already submitted for this assignment
         submission = submissions_by_assignment.get(a.id)
@@ -549,6 +542,7 @@ def submit_solution(
             # First, execute the reference code to get the expected output
             reference_output = ""
             reference_has_error = False
+            has_expected_output = False  # Track if we have a valid expected output for comparison
             if assignment.reference_code:
                 logger.info(f"Evaluating reference code for assignment {assignment_id}")
                 reference_result = evaluate_submission(
@@ -566,6 +560,11 @@ def submit_solution(
                     # If reference code fails, fall back to expected_output if available
                     if assignment.expected_output:
                         reference_output = assignment.expected_output
+                
+                has_expected_output = True
+            elif assignment.expected_output:
+                reference_output = assignment.expected_output
+                has_expected_output = True
             
             # Now evaluate the student's code
             result = evaluate_submission(
@@ -577,7 +576,7 @@ def submit_solution(
             
             # Check if output matches the reference/expected output
             # Only do this comparison if we have a reference_output to compare against
-            if reference_output and result.get("stdout") is not None:
+            if has_expected_output and result.get("stdout") is not None:
                 # If student code has compilation or runtime errors, keep that status
                 if result["status"] in [SubmissionStatus.COMPILATION_ERROR.value, SubmissionStatus.RUNTIME_ERROR.value]:
                     # Keep the error status
