@@ -16,8 +16,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      judge0-db:
-        condition: service_started
+      judge0:
+        condition: service_healthy
     restart: unless-stopped
 
   db:
