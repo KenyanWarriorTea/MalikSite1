@@ -343,6 +343,10 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     # Get all assignments
     assignments = db.query(Assignment).all()
     
+    # Get student's own submissions
+    student_submissions = db.query(Submission).filter(Submission.student_id == user_id).all()
+    submissions_by_assignment = {s.assignment_id: s for s in student_submissions}
+    
     cards = []
     for a in assignments:
         # Get language name from ID
@@ -358,12 +362,51 @@ def student_page(request: Request, db: Session = Depends(get_db)):
             </div>
             """
         
+        # Check if student has already submitted for this assignment
+        submission = submissions_by_assignment.get(a.id)
+        submission_result_display = ""
+        if submission:
+            status_class, status_text = format_status(submission.status)
+            submission_result_display = f"""
+            <div style='margin-top: 15px; padding: 15px; border-radius: 8px; border-left: 4px solid;'>
+              <h4 style='margin-top: 0;'>📊 Результат проверки:</h4>
+              <p style='font-size: 16px; margin: 10px 0;'><span class='{status_class}'>{status_text}</span></p>
+            """
+            
+            if submission.status == SubmissionStatus.ACCEPTED.value:
+                submission_result_display += f"""
+              <div style='background: #c8e6c9; border-radius: 4px; padding: 10px; margin: 10px 0; color: #2e7d32;'>
+                ✅ <strong>Поздравляем! Ваше решение верно!</strong>
+              </div>
+            """
+            elif submission.status == SubmissionStatus.WRONG_ANSWER.value:
+                submission_result_display += f"""
+              <div style='background: #ffcdd2; border-radius: 4px; padding: 10px; margin: 10px 0;'>
+                <strong>❌ Неправильный ответ</strong><br/>
+                <strong style='display: block; margin-top: 10px;'>Вывод вашего кода:</strong>
+                <pre style='background: #fff3cd; border: 1px solid #ffc107; padding: 10px; margin: 5px 0; max-height: 100px; overflow-y: auto;'>{html.escape(submission.stdout or '(нет вывода)')}</pre>
+              </div>
+            """
+            elif submission.status in [SubmissionStatus.COMPILATION_ERROR.value, SubmissionStatus.RUNTIME_ERROR.value]:
+                submission_result_display += f"""
+              <div style='background: #ffcdd2; border-radius: 4px; padding: 10px; margin: 10px 0;'>
+                <strong>❌ Ошибка:</strong><br/>
+                <pre style='background: #fff; border: 1px solid #f44336; padding: 10px; margin: 5px 0; color: #c62828; max-height: 100px; overflow-y: auto;'>{html.escape(submission.stderr or submission.stdout or '(нет информации об ошибке)')}</pre>
+              </div>
+            """
+            
+            submission_result_display += f"""
+              <small style='color: #666; display: block; margin-top: 10px;'>Отправлено: {submission.created_at.strftime('%Y-%m-%d %H:%M:%S')}</small>
+            </div>
+            """
+        
         cards.append(f"""
         <li class='card'>
           <h3>{html.escape(a.title)}</h3>
           <p>{html.escape(a.description)}</p>
-          <p><strong>Язык:</strong> {language_name}</p>
+          <p><strong>Язык программирования:</strong> <span style='background: #e3f2fd; padding: 2px 8px; border-radius: 4px; font-weight: bold;'>{language_name}</span></p>
           {reference_code_display}
+          {submission_result_display}
           <form method='post' action='/student/submissions'>
             <input type='hidden' name='assignment_id' value='{a.id}' />
             <textarea name='code' placeholder='Напишите ваш код здесь...' required style='font-family: monospace; min-height: 150px;'></textarea>
@@ -505,6 +548,7 @@ def submit_solution(
         try:
             # First, execute the reference code to get the expected output
             reference_output = ""
+            reference_has_error = False
             if assignment.reference_code:
                 logger.info(f"Evaluating reference code for assignment {assignment_id}")
                 reference_result = evaluate_submission(
@@ -515,9 +559,13 @@ def submit_solution(
                 )
                 reference_output = reference_result.get("stdout", "")
                 
-                # If reference code has errors, log it
+                # If reference code has errors, log it but still try to use expected_output if available
                 if reference_result["status"] != SubmissionStatus.ACCEPTED.value:
                     logger.warning(f"Reference code evaluation failed: {reference_result['status']}")
+                    reference_has_error = True
+                    # If reference code fails, fall back to expected_output if available
+                    if assignment.expected_output:
+                        reference_output = assignment.expected_output
             
             # Now evaluate the student's code
             result = evaluate_submission(
@@ -527,12 +575,19 @@ def submit_solution(
                 ""
             )
             
-            # Check if output matches the reference output
-            if reference_output and result.get("stdout"):
-                if compare_outputs(result.get("stdout", ""), reference_output):
-                    result["status"] = SubmissionStatus.ACCEPTED.value
+            # Check if output matches the reference/expected output
+            # Only do this comparison if we have a reference_output to compare against
+            if reference_output and result.get("stdout") is not None:
+                # If student code has compilation or runtime errors, keep that status
+                if result["status"] in [SubmissionStatus.COMPILATION_ERROR.value, SubmissionStatus.RUNTIME_ERROR.value]:
+                    # Keep the error status
+                    pass
                 else:
-                    result["status"] = SubmissionStatus.WRONG_ANSWER.value
+                    # Compare outputs
+                    if compare_outputs(result.get("stdout", ""), reference_output):
+                        result["status"] = SubmissionStatus.ACCEPTED.value
+                    else:
+                        result["status"] = SubmissionStatus.WRONG_ANSWER.value
             
             # Update submission with results
             submission.status = result["status"]
