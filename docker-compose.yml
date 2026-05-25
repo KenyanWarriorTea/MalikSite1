@@ -1,5 +1,17 @@
 version: '3.8'
 
+x-judge0-env: &judge0-env
+  REDIS_HOST: judge0-redis
+  REDIS_PORT: 6379
+  REDIS_PASSWORD: judge0-redis-password-change-me
+  POSTGRES_HOST: judge0-db
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: judge0
+  POSTGRES_USER: judge0
+  POSTGRES_PASSWORD: judge0-postgres-password-change-me
+  JUDGE0_TELEMETRY_ENABLE: 'false'
+  RAILS_ENV: production
+
 services:
   web:
     build:
@@ -7,20 +19,22 @@ services:
     ports:
       - '8000:8000'
     environment:
-      DATABASE_URL: postgresql://user:password@db:5432/tasks_db
-      JUDGE0_URL: http://judge0:2358
+      DATABASE_URL: postgresql://user:password@app-db:5432/tasks_db
+      JUDGE0_URL: http://judge0-server:2358
     volumes:
       - ./backend:/app
     networks:
       - app-network
     depends_on:
-      db:
+      app-db:
         condition: service_healthy
-      judge0:
+      judge0-server:
         condition: service_healthy
+      judge0-worker:
+        condition: service_started
     restart: unless-stopped
 
-  db:
+  app-db:
     image: postgres:15-alpine
     environment:
       POSTGRES_DB: tasks_db
@@ -31,37 +45,79 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user"]
+      test: ["CMD-SHELL", "pg_isready -U user -d tasks_db"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
-  judge0-db:
-    image: redis:7-alpine
-    networks:
-      - app-network
-    restart: unless-stopped
-
-  judge0:
+  judge0-server:
     image: judge0/judge0:latest
+    privileged: true
     ports:
       - '2358:2358'
+    environment:
+      <<: *judge0-env
     networks:
       - app-network
-    environment:
-      REDIS_URL: redis://judge0-db:6379
-      API_BASE_URL: http://judge0:2358
-      WORKERS: 1
     depends_on:
-      - judge0-db
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:2358/health"]
+      test: ["CMD-SHELL", "ruby -rnet/http -ruri -e \"res=Net::HTTP.get_response(URI('http://localhost:2358/health')); exit(res.code.to_i == 200 ? 0 : 1)\""]
       interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 30s
+      retries: 10
+      start_period: 60s
+
+  judge0-worker:
+    image: judge0/judge0:latest
+    command: ["./scripts/workers"]
+    privileged: true
+    environment:
+      <<: *judge0-env
+    networks:
+      - app-network
+    depends_on:
+      judge0-db:
+        condition: service_healthy
+      judge0-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  judge0-db:
+    image: postgres:16.2
+    environment:
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: judge0-postgres-password-change-me
+    volumes:
+      - judge0_db_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0 -d judge0"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  judge0-redis:
+    image: redis:7.2.4
+    command: ["bash", "-c", "docker-entrypoint.sh --appendonly no --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: judge0-redis-password-change-me
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
 networks:
   app-network:
@@ -69,3 +125,4 @@ networks:
 
 volumes:
   db_data:
+  judge0_db_data:
