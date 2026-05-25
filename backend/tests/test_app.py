@@ -109,7 +109,7 @@ def test_teacher_can_add_assignment():
         data={
             "title": "Print 42",
             "description": "Output the number 42",
-            "expected_output": "42\n",
+            "reference_code": "print(42)",
             "language_id": 71,
         },
         follow_redirects=False
@@ -134,7 +134,7 @@ def test_student_can_view_assignments():
         data={
             "title": "Echo Test",
             "description": "Print hello world",
-            "expected_output": "hello world\n",
+            "reference_code": 'print("hello world")',
             "language_id": 71,
         },
     )
@@ -161,7 +161,7 @@ def test_student_can_submit_code():
         data={
             "title": "Simple Print",
             "description": "Print 42",
-            "expected_output": "42\n",
+            "reference_code": "print(42)",
             "language_id": 71,
         },
     )
@@ -194,7 +194,7 @@ def test_teacher_can_view_student_submissions():
         data={
             "title": "Test Task",
             "description": "Do something",
-            "expected_output": "result\n",
+            "reference_code": 'print("result")',
             "language_id": 71,
         },
     )

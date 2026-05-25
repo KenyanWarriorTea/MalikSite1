@@ -15,7 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from database import init_db, get_db
 from models import User, Assignment, Submission, StudentActivity, SubmissionStatus
-from judge0_client import evaluate_submission
+from judge0_client import evaluate_submission, compare_outputs
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
 import logging
@@ -58,7 +58,7 @@ STUDENT_CODE = "student123"
 # UI Styles
 UI_STYLES = """
 <style>
-body { font-family: sans-serif; max-width: 1000px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f9f9f9; color: #333; }
+body { font-family: sans-serif; max-width: 1200px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f9f9f9; color: #333; }
 form { display: flex; flex-direction: column; gap: 12px; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
 input, textarea, select { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
 textarea { min-height: 100px; }
@@ -76,6 +76,12 @@ pre { background: #f1f1f1; padding: 10px; border-radius: 6px; font-family: monos
 .activity-item { padding: 4px 0; }
 .monitoring-indicator { display: inline-block; padding: 4px 8px; background: #ddd; border-radius: 4px; font-size: 12px; margin-left: 10px; }
 .monitoring-active { background: #e0ffe0; color: #080; }
+.result-success { background: #c8e6c9; border-left: 4px solid #4caf50; padding: 15px; border-radius: 4px; margin: 10px 0; }
+.result-error { background: #ffcdd2; border-left: 4px solid #f44336; padding: 15px; border-radius: 4px; margin: 10px 0; }
+.result-success::before { content: '✅ '; font-weight: bold; color: #2e7d32; }
+.result-error::before { content: '❌ '; font-weight: bold; color: #c62828; }
+.code-output { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin: 10px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; }
+h2 { color: #212121; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
 </style>
 """
 
@@ -204,6 +210,20 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     for a in assignments:
         submissions = db.query(Submission).filter(Submission.assignment_id == a.id).all()
         
+        # Get language name
+        language_names = {71: "Python", 62: "Java", 54: "C++", 63: "JavaScript"}
+        language_name = language_names.get(a.language_id, "Unknown")
+        
+        # Display reference code
+        reference_display = ""
+        if a.reference_code:
+            reference_display = f"""
+            <div style='margin: 15px 0; padding: 15px; background: #f0f8ff; border-radius: 8px; border-left: 4px solid #2196F3;'>
+              <h4 style='margin: 0 0 10px 0; color: #1976d2;'>📝 Эталонный код ({language_name}):</h4>
+              <pre style='background: white; border: 1px solid #ddd; margin: 0;'>{html.escape(a.reference_code)}</pre>
+            </div>
+            """
+        
         rows = []
         for s in submissions:
             student = db.query(User).filter(User.id == s.student_id).first()
@@ -223,11 +243,23 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
                 </div>
                 """
             
+            # Show student output
+            output_display = ""
+            if s.stdout:
+                output_display = f"""
+                <div style='margin-top: 10px;'>
+                  <strong>Вывод программы:</strong>
+                  <pre style='background: #fff3cd; border: 1px solid #ffc107; padding: 10px;'>{html.escape(s.stdout)}</pre>
+                </div>
+                """
+            
             rows.append(
                 f"<li style='margin-top:10px; padding-bottom: 15px; border-bottom: 1px solid #eee;'>"
                 f"<b>{student_name}</b>: "
                 f"<span class='{status_class}'>{status_text}</span>"
+                f"<strong style='display: block; margin-top: 10px;'>Код:</strong>"
                 f"<pre>{html.escape(s.code)}</pre>"
+                f"{output_display}"
                 f"<small style='color: #666;'>Отправлено: {s.created_at.strftime('%Y-%m-%d %H:%M:%S')}</small>"
                 f"{activity_html}"
                 f"</li>"
@@ -236,6 +268,9 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         assignment_items.append(
             f"<li class='card'><h3>Задание: {html.escape(a.title)}</h3>"
             f"<p>{html.escape(a.description)}</p>"
+            f"<p><strong>Язык:</strong> {language_name}</p>"
+            f"{reference_display}"
+            f"<h4 style='margin-top: 20px;'>Ответы студентов ({len(submissions)}):</h4>"
             f"<ul>{''.join(rows) or '<li>Решений пока нет</li>'}</ul>"
             f"</li>"
         )
@@ -248,11 +283,12 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
       <h2>Добавить задание</h2>
       <input name='title' placeholder='Название задания' required />
       <textarea name='description' placeholder='Описание задания (Что нужно сделать)' required></textarea>
-      <input name='expected_output' placeholder='Ожидаемый результат (например: 42)' />
-      <select name='language_id'>
+      <textarea name='reference_code' placeholder='Эталонный код (правильное решение)' required></textarea>
+      <select name='language_id' required>
          <option value='71'>Python (3.8.1)</option>
          <option value='62'>Java</option>
          <option value='54'>C++</option>
+         <option value='63'>JavaScript</option>
       </select>
       <button type='submit'>Опубликовать задание</button>
     </form>
@@ -267,7 +303,7 @@ def add_assignment(
     request: Request,
     title: str = Form(...),
     description: str = Form(...),
-    expected_output: str = Form(""),
+    reference_code: str = Form(""),
     language_id: int = Form(...),
     db: Session = Depends(get_db)
 ):
@@ -283,7 +319,7 @@ def add_assignment(
         teacher_id=user_id,
         title=title,
         description=description,
-        expected_output=expected_output,
+        reference_code=reference_code,
         language_id=language_id
     )
     db.add(assignment)
@@ -309,13 +345,28 @@ def student_page(request: Request, db: Session = Depends(get_db)):
     
     cards = []
     for a in assignments:
+        # Get language name from ID
+        language_names = {71: "Python", 62: "Java", 54: "C++", 63: "JavaScript"}
+        language_name = language_names.get(a.language_id, "Unknown")
+        
+        reference_code_display = ""
+        if a.reference_code:
+            reference_code_display = f"""
+            <div style='margin-top: 15px; padding: 15px; background: #f0f8ff; border-radius: 8px; border-left: 4px solid #2196F3;'>
+              <h4 style='margin-top: 0;'>📝 Эталонный код:</h4>
+              <pre style='background: #fff; border: 1px solid #ddd;'>{html.escape(a.reference_code)}</pre>
+            </div>
+            """
+        
         cards.append(f"""
         <li class='card'>
           <h3>{html.escape(a.title)}</h3>
           <p>{html.escape(a.description)}</p>
+          <p><strong>Язык:</strong> {language_name}</p>
+          {reference_code_display}
           <form method='post' action='/student/submissions'>
             <input type='hidden' name='assignment_id' value='{a.id}' />
-            <textarea name='code' placeholder='Напишите ваш код здесь...' required></textarea>
+            <textarea name='code' placeholder='Напишите ваш код здесь...' required style='font-family: monospace; min-height: 150px;'></textarea>
             <button type='submit'>Отправить решение на проверку</button>
           </form>
         </li>
@@ -452,12 +503,36 @@ def submit_solution(
         
         # Evaluate code using Judge0
         try:
+            # First, execute the reference code to get the expected output
+            reference_output = ""
+            if assignment.reference_code:
+                logger.info(f"Evaluating reference code for assignment {assignment_id}")
+                reference_result = evaluate_submission(
+                    assignment.reference_code,
+                    assignment.language_id,
+                    "",
+                    ""
+                )
+                reference_output = reference_result.get("stdout", "")
+                
+                # If reference code has errors, log it
+                if reference_result["status"] != SubmissionStatus.ACCEPTED.value:
+                    logger.warning(f"Reference code evaluation failed: {reference_result['status']}")
+            
+            # Now evaluate the student's code
             result = evaluate_submission(
                 code,
                 assignment.language_id,
-                assignment.expected_output,
+                reference_output if reference_output else (assignment.expected_output or ""),
                 ""
             )
+            
+            # Check if output matches the reference output
+            if reference_output and result.get("stdout"):
+                if compare_outputs(result.get("stdout", ""), reference_output):
+                    result["status"] = SubmissionStatus.ACCEPTED.value
+                else:
+                    result["status"] = SubmissionStatus.WRONG_ANSWER.value
             
             # Update submission with results
             submission.status = result["status"]
