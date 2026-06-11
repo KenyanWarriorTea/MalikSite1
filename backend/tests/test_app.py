@@ -1,4 +1,4 @@
-"""Tests for MalikSite1 application"""
+"""Tests for Code Wave application"""
 import pathlib
 import sys
 import os
@@ -71,7 +71,7 @@ def test_login_page_loads():
     """Test that login page loads successfully"""
     response = client.get("/")
     assert response.status_code == 200
-    assert "MalikSite" in response.text or "Образовательная платформа" in response.text
+    assert "Code Wave" in response.text
 
 
 def test_login_page_does_not_show_access_codes():

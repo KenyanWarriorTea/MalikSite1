@@ -1,5 +1,5 @@
 """
-MalikSite1 - Judge0 Educational Platform
+Code Wave - Judge0 Educational Platform
 Web application for teachers to publish assignments and students to submit solutions.
 Includes student activity monitoring for academic integrity.
 """
@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # Initialize database
 init_db()
 
-app = FastAPI(title="MalikSite1")
+APP_NAME = "Code Wave"
+
+app = FastAPI(title=APP_NAME)
 
 SESSION_SECRET = secrets.token_urlsafe(32)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -65,32 +67,281 @@ ACCESS_CODE_DEFAULTS = {
 # UI Styles
 UI_STYLES = """
 <style>
-body { font-family: sans-serif; max-width: 1200px; margin: 40px auto; padding: 20px; line-height: 1.6; background: #f9f9f9; color: #333; }
-form { display: flex; flex-direction: column; gap: 12px; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-input, textarea, select { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
-textarea { min-height: 100px; }
-button { padding: 12px 24px; border: none; border-radius: 8px; color: white; background: #212121; font-weight: bold; font-size: 16px; cursor: pointer; transition: 0.2s; width: fit-content; }
-button:hover { background: #444; }
-.logout-btn { display: inline-block; padding: 8px 16px; background: #e0e0e0; color: #333; border-radius: 6px; text-decoration: none; font-size: 14px; margin-bottom: 20px; font-weight: bold; }
-.logout-btn:hover { background: #ccc; }
-.card { background: white; padding: 20px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); list-style: none; }
-pre { background: #f1f1f1; padding: 10px; border-radius: 6px; font-family: monospace; overflow-x: auto; max-height: 200px; }
-.status-accepted { color: green; font-weight: bold; }
-.status-pending { color: orange; font-weight: bold; }
-.status-error { color: red; font-weight: bold; }
-.status-wrong { color: #ff6b6b; font-weight: bold; }
-.activity-log { background: #ffe0e0; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 12px; max-height: 150px; overflow-y: auto; color: #c00; }
+:root {
+  --ink: #102033;
+  --muted: #64748b;
+  --line: #dbe5ee;
+  --panel: #ffffff;
+  --panel-soft: #f6f9fc;
+  --brand: #0f766e;
+  --brand-dark: #0f3f4a;
+  --accent: #2563eb;
+  --warm: #f59e0b;
+  --danger: #dc2626;
+  --success: #15803d;
+  --shadow: 0 18px 50px rgba(15, 32, 51, 0.12);
+}
+* { box-sizing: border-box; }
+body {
+  font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+  max-width: 1180px;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 28px;
+  line-height: 1.55;
+  background:
+    linear-gradient(140deg, rgba(37, 99, 235, 0.08), rgba(15, 118, 110, 0.08) 45%, rgba(245, 158, 11, 0.08)),
+    #edf3f8;
+  color: var(--ink);
+}
+a { color: inherit; }
+ul { padding-left: 0; }
+h1, h2, h3, h4, p { margin-top: 0; }
+h1 { font-size: clamp(28px, 4vw, 44px); line-height: 1.05; letter-spacing: 0; margin-bottom: 18px; }
+h2 {
+  color: var(--ink);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+  margin-bottom: 16px;
+  font-size: 22px;
+}
+h3 { font-size: 20px; margin-bottom: 10px; }
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 22px;
+  border: 1px solid rgba(219, 229, 238, 0.9);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(15, 32, 51, 0.08);
+}
+input, textarea, select {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 15px;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+  background: #fbfdff;
+}
+textarea { min-height: 110px; resize: vertical; }
+button {
+  align-self: flex-start;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--brand), var(--accent));
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
+}
+button:hover { transform: translateY(-1px); filter: brightness(1.04); }
+button:active { transform: translateY(0); }
+pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px;
+  border-radius: 8px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  overflow-x: auto;
+  max-height: 220px;
+}
+.brand-shell {
+  min-height: calc(100vh - 56px);
+  display: grid;
+  place-items: center;
+}
+.login-card {
+  width: min(430px, 100%);
+  padding: 30px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.login-card form {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand-dark), var(--brand), var(--warm));
+  color: #fff;
+  font-weight: 900;
+  letter-spacing: 0;
+  box-shadow: 0 14px 30px rgba(15, 118, 110, 0.24);
+}
+.brand-name { font-size: 28px; font-weight: 900; letter-spacing: 0; }
+.brand-subtitle { margin: -8px 0 22px 58px; color: var(--muted); font-size: 14px; }
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  margin-bottom: 22px;
+  border-radius: 8px;
+  background: #102033;
+  color: #fff;
+  box-shadow: var(--shadow);
+}
+.topbar .brand-lockup { margin-bottom: 0; }
+.topbar .brand-mark {
+  width: 40px;
+  height: 40px;
+  box-shadow: none;
+}
+.topbar .brand-name { font-size: 22px; }
+.page-title { margin-bottom: 4px; }
+.page-kicker { color: #cbd5e1; margin: 0; font-size: 14px; }
+.toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.logout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 700;
+}
+.logout-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.panel-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.35fr);
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 24px;
+}
+.section-title { margin: 26px 0 14px; }
+.card {
+  background: rgba(255, 255, 255, 0.96);
+  padding: 20px;
+  border: 1px solid rgba(219, 229, 238, 0.9);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  box-shadow: 0 12px 30px rgba(15, 32, 51, 0.08);
+  list-style: none;
+}
+.card p { color: var(--muted); }
+.empty-card { color: var(--muted); }
+.language-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: #e0f2fe;
+  color: #075985;
+  font-weight: 800;
+  font-size: 13px;
+}
+.status-accepted { color: var(--success); font-weight: 800; }
+.status-pending { color: var(--warm); font-weight: 800; }
+.status-error { color: var(--danger); font-weight: 800; }
+.status-wrong { color: #be123c; font-weight: 800; }
+.activity-log {
+  background: #fff1f2;
+  padding: 12px;
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+  max-height: 160px;
+  overflow-y: auto;
+  color: #9f1239;
+}
 .activity-item { padding: 4px 0; }
-.monitoring-indicator { display: inline-block; padding: 4px 8px; background: #ddd; border-radius: 4px; font-size: 12px; margin-left: 10px; }
-.monitoring-active { background: #e0ffe0; color: #080; }
-.result-success { background: #c8e6c9; border-left: 4px solid #4caf50; padding: 15px; border-radius: 4px; margin: 10px 0; }
-.result-error { background: #ffcdd2; border-left: 4px solid #f44336; padding: 15px; border-radius: 4px; margin: 10px 0; }
-.result-success::before { content: '✅ '; font-weight: bold; color: #2e7d32; }
-.result-error::before { content: '❌ '; font-weight: bold; color: #c62828; }
-.code-output { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 10px; margin: 10px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; }
-h2 { color: #212121; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
+.monitoring-indicator {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  background: rgba(20, 184, 166, 0.14);
+  border: 1px solid rgba(20, 184, 166, 0.28);
+  border-radius: 8px;
+  color: #ccfbf1;
+  font-size: 12px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.monitoring-active { color: #ccfbf1; }
+.result-success {
+  background: #ecfdf5;
+  border-left: 4px solid var(--success);
+  padding: 15px;
+  border-radius: 8px;
+  margin: 10px 0 18px;
+}
+.result-error {
+  background: #fff1f2;
+  border-left: 4px solid var(--danger);
+  padding: 15px;
+  border-radius: 8px;
+  margin: 10px 0 18px;
+}
+.result-success::before { content: '✓ '; font-weight: bold; color: var(--success); }
+.result-error::before { content: '! '; font-weight: bold; color: var(--danger); }
+.code-output {
+  background: #0f172a;
+  border: 1px solid #243047;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 10px 0;
+  font-family: "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+@media (max-width: 760px) {
+  body { padding: 16px; }
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .panel-grid { grid-template-columns: 1fr; }
+  .brand-subtitle { margin-left: 0; }
+  button { width: 100%; }
+  .toolbar, .logout-btn { width: 100%; }
+}
 </style>
 """
+
+
+def render_page_open(body_class: str = "") -> str:
+    """Render a shared HTML head and opening body tag."""
+    class_attr = f" class='{html.escape(body_class)}'" if body_class else ""
+    return (
+        "<!doctype html>"
+        "<html lang='ru'>"
+        "<head>"
+        "<meta charset='utf-8' />"
+        "<meta name='viewport' content='width=device-width, initial-scale=1' />"
+        f"<title>{APP_NAME}</title>"
+        f"{UI_STYLES}"
+        "</head>"
+        f"<body{class_attr}>"
+    )
 
 LANGUAGE_NAME_TO_ID = {
     "python": 71,
@@ -281,15 +532,22 @@ def get_activity_summary(db: Session, submission_id: int) -> dict:
 def login_page():
     """Login page for teachers and students"""
     return f"""
-    <html><body>{UI_STYLES}
-    <div style='max-width: 400px; margin: 100px auto; text-align: center;'>
-        <h1>🎓 MalikSite - Образовательная платформа</h1>
+    {render_page_open('login-page')}
+    <main class='brand-shell'>
+      <section class='login-card'>
+        <div class='brand-lockup'>
+          <span class='brand-mark'>CW</span>
+          <span class='brand-name'>{APP_NAME}</span>
+        </div>
+        <p class='brand-subtitle'>Личный кабинет для учебных заданий и проверки кода</p>
         <form method='post' action='/login'>
+          <h2>Вход</h2>
           <input name='name' placeholder='Ваше имя' required />
           <input type='password' name='access_code' placeholder='Секретный код доступа' required />
           <button type='submit' style='width: 100%;'>Войти</button>
         </form>
-    </div>
+      </section>
+    </main>
     </body></html>
     """
 
@@ -440,10 +698,21 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         )
 
     return f"""
-    <html><body>{UI_STYLES}
-    <h1>Панель учителя: {name}</h1>
-    <a href='/' class='logout-btn'>Выйти из системы</a>
+    {render_page_open('dashboard-page')}
+    <header class='topbar'>
+      <div class='brand-lockup'>
+        <span class='brand-mark'>CW</span>
+        <div>
+          <div class='brand-name'>{APP_NAME}</div>
+          <p class='page-kicker'>Кабинет учителя: {name}</p>
+        </div>
+      </div>
+      <div class='toolbar'>
+        <a href='/' class='logout-btn'>Выйти</a>
+      </div>
+    </header>
     {form_message}
+    <div class='panel-grid'>
     <form method='post' action='/teacher/access-codes' style='margin-bottom: 20px;'>
       <h2>Коды доступа</h2>
       <input name='teacher_code' value='{current_teacher_code}' placeholder='Код доступа для учителя' required minlength='4' maxlength='255' />
@@ -477,6 +746,7 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
       </select>
       <button type='submit'>Опубликовать задание</button>
     </form>
+    </div>
     <script>
       const codeCheckbox = document.getElementById('is_code_assignment');
       const testsBuilder = document.getElementById('tests_builder');
@@ -537,7 +807,7 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         }}
       }});
     </script>
-    <h2>Список заданий и ответы студентов</h2>
+    <h2 class='section-title'>Список заданий и ответы студентов</h2>
     <ul>{''.join(assignment_items) or '<li class="card">Заданий пока нет. Создайте первое!</li>'}</ul>
     </body></html>
     """
@@ -750,7 +1020,7 @@ def student_page(request: Request, db: Session = Depends(get_db)):
           <h3>{html.escape(a.title)}</h3>
           <p>{html.escape(a.description)}</p>
           <p><strong>Тип:</strong> {'Кодинг' if a.is_code_assignment else 'Текстовое'}</p>
-          <p><strong>Язык программирования:</strong> <span style='background: #e3f2fd; padding: 2px 8px; border-radius: 4px; font-weight: bold;'>{language_name}</span></p>
+          <p><strong>Язык программирования:</strong> <span class='language-pill'>{language_name}</span></p>
           {reference_code_display}
           {submission_result_display}
           {submission_form_html}
@@ -758,10 +1028,21 @@ def student_page(request: Request, db: Session = Depends(get_db)):
         """)
     
     return f"""
-    <html><body>{UI_STYLES}
-    <h1>Панель ученика: {name} <span class='monitoring-indicator monitoring-active'>📡 Мониторинг активен</span></h1>
-    <a href='/' class='logout-btn'>Выйти из системы</a>
-    <h2>Доступные задания для выполнения</h2>
+    {render_page_open('dashboard-page')}
+    <header class='topbar'>
+      <div class='brand-lockup'>
+        <span class='brand-mark'>CW</span>
+        <div>
+          <div class='brand-name'>{APP_NAME}</div>
+          <p class='page-kicker'>Кабинет ученика: {name}</p>
+        </div>
+      </div>
+      <div class='toolbar'>
+        <span class='monitoring-indicator monitoring-active'>Мониторинг активен</span>
+        <a href='/' class='logout-btn'>Выйти</a>
+      </div>
+    </header>
+    <h1 class='page-title'>Доступные задания</h1>
     <ul>{''.join(cards) or '<li class="card">Отлично! Преподаватель еще не добавил заданий. Отдыхайте.</li>'}</ul>
     
     <script>
