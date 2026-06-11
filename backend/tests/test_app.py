@@ -74,6 +74,14 @@ def test_login_page_loads():
     assert "MalikSite" in response.text or "Образовательная платформа" in response.text
 
 
+def test_login_page_does_not_show_access_codes():
+    """Access codes should not be visible before login."""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "teacher123" not in response.text
+    assert "student123" not in response.text
+
+
 def test_teacher_login():
     """Test teacher login"""
     response = client.post(
@@ -94,6 +102,52 @@ def test_student_login():
     )
     assert response.status_code == 303
     assert "/student" in response.headers["location"]
+
+
+def test_teacher_can_change_access_codes():
+    """Teacher can update teacher/student access codes from dashboard."""
+    client.post(
+        "/login",
+        data={"name": "TeacherCodes", "access_code": "teacher123"},
+    )
+
+    response = client.post(
+        "/teacher/access-codes",
+        data={
+            "teacher_code": "teacher-new-code",
+            "student_code": "student-new-code",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/teacher?access_codes_updated=1" in response.headers["location"]
+
+    old_student_client = TestClient(web_app.app)
+    old_response = old_student_client.post(
+        "/login",
+        data={"name": "OldStudentCode", "access_code": "student123"},
+        follow_redirects=False,
+    )
+    assert old_response.status_code == 303
+    assert old_response.headers["location"] == "/"
+
+    new_student_client = TestClient(web_app.app)
+    new_response = new_student_client.post(
+        "/login",
+        data={"name": "NewStudentCode", "access_code": "student-new-code"},
+        follow_redirects=False,
+    )
+    assert new_response.status_code == 303
+    assert "/student" in new_response.headers["location"]
+
+    new_teacher_client = TestClient(web_app.app)
+    teacher_response = new_teacher_client.post(
+        "/login",
+        data={"name": "NewTeacherCode", "access_code": "teacher-new-code"},
+        follow_redirects=False,
+    )
+    assert teacher_response.status_code == 303
+    assert "/teacher" in teacher_response.headers["location"]
 
 
 def test_teacher_can_add_assignment():

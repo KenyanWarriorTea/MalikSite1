@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
 from database import init_db, get_db
-from models import User, Assignment, Submission, StudentActivity, SubmissionStatus
+from models import User, AccessCode, Assignment, Submission, StudentActivity, SubmissionStatus
 from judge0_client import evaluate_submission, evaluate_code_with_tests, stream_judge0_result
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import PlainTextResponse
@@ -54,9 +54,13 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(ErrorHandlingMiddleware)
 
-# Secret codes for access
-TEACHER_CODE = "teacher123"
-STUDENT_CODE = "student123"
+# Default access codes. Teachers can change the active values from the dashboard.
+DEFAULT_TEACHER_CODE = os.getenv("TEACHER_CODE", "teacher123")
+DEFAULT_STUDENT_CODE = os.getenv("STUDENT_CODE", "student123")
+ACCESS_CODE_DEFAULTS = {
+    "teacher": DEFAULT_TEACHER_CODE,
+    "student": DEFAULT_STUDENT_CODE,
+}
 
 # UI Styles
 UI_STYLES = """
@@ -120,6 +124,45 @@ def get_or_create_user(db: Session, name: str, role: str) -> User:
         db.refresh(user)
     
     return user
+
+
+def get_access_code(db: Session, role: str) -> str:
+    """Return the active access code for a role, creating the default if needed."""
+    access_code = db.query(AccessCode).filter(AccessCode.role == role).first()
+    if access_code:
+        return access_code.code
+
+    default_code = ACCESS_CODE_DEFAULTS[role]
+    access_code = AccessCode(role=role, code=default_code)
+    db.add(access_code)
+    db.commit()
+    db.refresh(access_code)
+    return access_code.code
+
+
+def update_access_code(db: Session, role: str, code: str, updated_by: int) -> None:
+    """Create or update an access code for a role."""
+    cleaned_code = code.strip()
+    access_code = db.query(AccessCode).filter(AccessCode.role == role).first()
+    if access_code:
+        access_code.code = cleaned_code
+        access_code.updated_by = updated_by
+    else:
+        access_code = AccessCode(role=role, code=cleaned_code, updated_by=updated_by)
+        db.add(access_code)
+
+
+def validate_access_codes(teacher_code: str, student_code: str) -> tuple[bool, str]:
+    """Validate access code form values."""
+    teacher_code = teacher_code.strip()
+    student_code = student_code.strip()
+    if len(teacher_code) < 4 or len(student_code) < 4:
+        return False, "Код должен быть не короче 4 символов."
+    if len(teacher_code) > 255 or len(student_code) > 255:
+        return False, "Код не должен быть длиннее 255 символов."
+    if teacher_code == student_code:
+        return False, "Коды учителя и ученика должны отличаться."
+    return True, ""
 
 
 def parse_tests_json(raw_tests: str) -> list[dict]:
@@ -246,11 +289,6 @@ def login_page():
           <input type='password' name='access_code' placeholder='Секретный код доступа' required />
           <button type='submit' style='width: 100%;'>Войти</button>
         </form>
-        <p style='color: #666; font-size: 12px; margin-top: 20px;'>
-          <strong>Тестовые коды:</strong><br/>
-          Учитель: teacher123<br/>
-          Ученик: student123
-        </p>
     </div>
     </body></html>
     """
@@ -259,9 +297,12 @@ def login_page():
 @app.post("/login")
 def login(request: Request, name: str = Form(...), access_code: str = Form(...), db: Session = Depends(get_db)):
     """Handle login for teachers and students"""
-    if access_code == TEACHER_CODE:
+    teacher_code = get_access_code(db, "teacher")
+    student_code = get_access_code(db, "student")
+
+    if access_code == teacher_code:
         role = "teacher"
-    elif access_code == STUDENT_CODE:
+    elif access_code == student_code:
         role = "student"
     else:
         return RedirectResponse(url="/", status_code=303)
@@ -295,6 +336,10 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     form_error = request.query_params.get("form_error")
     assignment_saved = request.query_params.get("assignment_saved")
     tests_saved_count = request.query_params.get("tests_saved_count")
+    access_codes_updated = request.query_params.get("access_codes_updated")
+    access_code_error = request.query_params.get("access_code_error")
+    current_teacher_code = html.escape(get_access_code(db, "teacher"))
+    current_student_code = html.escape(get_access_code(db, "student"))
     
     assignment_items = []
     for a in assignments:
@@ -366,7 +411,19 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         )
     
     form_message = ""
-    if form_error:
+    if access_code_error:
+        form_message = (
+            "<div class='result-error' style='margin-bottom:16px;'>"
+            f"{html.escape(access_code_error)}"
+            "</div>"
+        )
+    elif access_codes_updated == "1":
+        form_message = (
+            "<div class='result-success' style='margin-bottom:16px;'>"
+            "Коды доступа успешно обновлены."
+            "</div>"
+        )
+    elif form_error:
         form_message = (
             "<div class='result-error' style='margin-bottom:16px;'>"
             f"{html.escape(form_error)}"
@@ -387,6 +444,12 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     <h1>Панель учителя: {name}</h1>
     <a href='/' class='logout-btn'>Выйти из системы</a>
     {form_message}
+    <form method='post' action='/teacher/access-codes' style='margin-bottom: 20px;'>
+      <h2>Коды доступа</h2>
+      <input name='teacher_code' value='{current_teacher_code}' placeholder='Код доступа для учителя' required minlength='4' maxlength='255' />
+      <input name='student_code' value='{current_student_code}' placeholder='Код доступа для ученика' required minlength='4' maxlength='255' />
+      <button type='submit'>Сохранить коды</button>
+    </form>
     <form method='post' action='/teacher/assignments' id='assignment_form'>
       <h2>Добавить задание</h2>
       <input name='title' placeholder='Название задания' required />
@@ -478,6 +541,35 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     <ul>{''.join(assignment_items) or '<li class="card">Заданий пока нет. Создайте первое!</li>'}</ul>
     </body></html>
     """
+
+
+@app.post("/teacher/access-codes")
+def change_access_codes(
+    request: Request,
+    teacher_code: str = Form(...),
+    student_code: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Allow a logged-in teacher to change teacher/student access codes."""
+    if request.session.get("role") != "teacher":
+        return RedirectResponse(url="/")
+
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse(url="/")
+
+    is_valid, error = validate_access_codes(teacher_code, student_code)
+    if not is_valid:
+        return RedirectResponse(
+            url=f"/teacher?access_code_error={quote_plus(error)}",
+            status_code=303,
+        )
+
+    update_access_code(db, "teacher", teacher_code, user_id)
+    update_access_code(db, "student", student_code, user_id)
+    db.commit()
+
+    return RedirectResponse(url="/teacher?access_codes_updated=1", status_code=303)
 
 
 @app.post("/teacher/assignments")

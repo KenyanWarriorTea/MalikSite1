@@ -22,6 +22,17 @@ class User(Base):
     activities = relationship("StudentActivity", back_populates="student")
 
 
+class AccessCode(Base):
+    """Editable access code for a user role."""
+    __tablename__ = "access_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role = Column(String(50), nullable=False, unique=True, index=True)
+    code = Column(String(255), nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
 class Assignment(Base):
     """Assignment model"""
     __tablename__ = "assignments"
