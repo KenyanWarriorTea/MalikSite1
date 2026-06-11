@@ -251,6 +251,39 @@ pre {
 }
 .card p { color: var(--muted); }
 .empty-card { color: var(--muted); }
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.card-header h3 { margin-bottom: 0; }
+.inline-delete-form {
+  display: inline-flex;
+  width: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.danger-btn {
+  background: #dc2626;
+  box-shadow: 0 10px 22px rgba(220, 38, 38, 0.18);
+}
+.danger-btn:hover { filter: brightness(1.04); }
+.small-btn {
+  padding: 8px 11px;
+  font-size: 13px;
+}
+.submission-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
 .language-pill {
   display: inline-flex;
   align-items: center;
@@ -320,9 +353,10 @@ pre {
   body { padding: 16px; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .panel-grid { grid-template-columns: 1fr; }
+  .card-header { flex-direction: column; }
   .brand-subtitle { margin-left: 0; }
   button { width: 100%; }
-  .toolbar, .logout-btn { width: 100%; }
+  .toolbar, .logout-btn, .inline-delete-form { width: 100%; }
 }
 </style>
 """
@@ -596,6 +630,8 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
     tests_saved_count = request.query_params.get("tests_saved_count")
     access_codes_updated = request.query_params.get("access_codes_updated")
     access_code_error = request.query_params.get("access_code_error")
+    assignment_deleted = request.query_params.get("assignment_deleted")
+    submission_deleted = request.query_params.get("submission_deleted")
     current_teacher_code = html.escape(get_access_code(db, "teacher"))
     current_student_code = html.escape(get_access_code(db, "student"))
     
@@ -651,13 +687,24 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
                 f"<strong style='display: block; margin-top: 10px;'>Код:</strong>"
                 f"<pre>{html.escape(s.code)}</pre>"
                 f"{output_display}"
+                f"<div class='submission-meta'>"
                 f"<small style='color: #666;'>Отправлено: {s.created_at.strftime('%Y-%m-%d %H:%M:%S')}</small>"
+                f"<form method='post' action='/teacher/submissions/{s.id}/delete' class='inline-delete-form' onsubmit=\"return confirm('Удалить ответ студента?');\">"
+                f"<button type='submit' class='danger-btn small-btn'>Удалить ответ</button>"
+                f"</form>"
+                f"</div>"
                 f"{activity_html}"
                 f"</li>"
             )
         
         assignment_items.append(
-            f"<li class='card'><h3>Задание: {html.escape(a.title)}</h3>"
+            f"<li class='card'>"
+            f"<div class='card-header'>"
+            f"<h3>Задание: {html.escape(a.title)}</h3>"
+            f"<form method='post' action='/teacher/assignments/{a.id}/delete' class='inline-delete-form' onsubmit=\"return confirm('Удалить задание и все ответы студентов?');\">"
+            f"<button type='submit' class='danger-btn small-btn'>Удалить задание</button>"
+            f"</form>"
+            f"</div>"
             f"<p>{html.escape(a.description)}</p>"
             f"<p><strong>Тип:</strong> {'Кодинг' if a.is_code_assignment else 'Текстовое'}</p>"
             f"<p><strong>Язык:</strong> {language_name}</p>"
@@ -679,6 +726,18 @@ def teacher_page(request: Request, db: Session = Depends(get_db)):
         form_message = (
             "<div class='result-success' style='margin-bottom:16px;'>"
             "Коды доступа успешно обновлены."
+            "</div>"
+        )
+    elif assignment_deleted == "1":
+        form_message = (
+            "<div class='result-success' style='margin-bottom:16px;'>"
+            "Задание и связанные ответы студентов удалены."
+            "</div>"
+        )
+    elif submission_deleted == "1":
+        form_message = (
+            "<div class='result-success' style='margin-bottom:16px;'>"
+            "Ответ студента удален."
             "</div>"
         )
     elif form_error:
@@ -924,6 +983,72 @@ def add_assignment(
         url=f"/teacher?assignment_saved=1&tests_saved_count={stored_tests_count}",
         status_code=303,
     )
+
+
+@app.post("/teacher/assignments/{assignment_id}/delete")
+def delete_assignment(
+    assignment_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Delete a teacher-owned assignment and all related submissions/activity."""
+    if request.session.get("role") != "teacher":
+        return RedirectResponse(url="/")
+
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse(url="/")
+
+    assignment = db.query(Assignment).filter(
+        Assignment.id == assignment_id,
+        Assignment.teacher_id == user_id,
+    ).first()
+    if not assignment:
+        return RedirectResponse(url="/teacher", status_code=303)
+
+    submission_ids = [
+        row[0]
+        for row in db.query(Submission.id).filter(
+            Submission.assignment_id == assignment.id
+        ).all()
+    ]
+    if submission_ids:
+        db.query(StudentActivity).filter(
+            StudentActivity.submission_id.in_(submission_ids)
+        ).delete(synchronize_session=False)
+
+    db.delete(assignment)
+    db.commit()
+    return RedirectResponse(url="/teacher?assignment_deleted=1", status_code=303)
+
+
+@app.post("/teacher/submissions/{submission_id}/delete")
+def delete_submission(
+    submission_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Delete a student's submission when it belongs to the current teacher."""
+    if request.session.get("role") != "teacher":
+        return RedirectResponse(url="/")
+
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse(url="/")
+
+    submission = db.query(Submission).join(Assignment).filter(
+        Submission.id == submission_id,
+        Assignment.teacher_id == user_id,
+    ).first()
+    if not submission:
+        return RedirectResponse(url="/teacher", status_code=303)
+
+    db.query(StudentActivity).filter(
+        StudentActivity.submission_id == submission.id
+    ).delete(synchronize_session=False)
+    db.delete(submission)
+    db.commit()
+    return RedirectResponse(url="/teacher?submission_deleted=1", status_code=303)
 
 
 @app.get("/student", response_class=HTMLResponse)

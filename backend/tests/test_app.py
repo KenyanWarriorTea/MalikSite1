@@ -23,7 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 # Import after env setup
 import app as web_app
-from models import Base, Assignment, Submission, SubmissionStatus, User
+from models import Base, Assignment, Submission, StudentActivity, SubmissionStatus, User
 import database
 
 # Override the database to use our test configuration
@@ -275,6 +275,138 @@ def test_teacher_can_view_student_submissions():
     teacher_page = client.get("/teacher")
     assert "Student3" in teacher_page.text
     assert 'print("result")' in teacher_page.text or "print" in teacher_page.text
+
+
+def test_teacher_can_delete_student_submission():
+    """Teacher can delete a submission for their own assignment."""
+    client.post(
+        "/login",
+        data={"name": "TeacherDeleteSubmission", "access_code": "teacher123"},
+    )
+
+    db = database.SessionLocal()
+    try:
+        teacher = db.query(User).filter(User.name == "TeacherDeleteSubmission").first()
+        student = User(name="StudentDeleteSubmission", role="student")
+        db.add(student)
+        db.commit()
+        db.refresh(student)
+
+        assignment = Assignment(
+            teacher_id=teacher.id,
+            title="Delete Submission Task",
+            description="desc",
+            reference_code="print(1)",
+            language_id=71,
+        )
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+
+        submission = Submission(
+            assignment_id=assignment.id,
+            student_id=student.id,
+            code="print(1)",
+            status=SubmissionStatus.ACCEPTED.value,
+        )
+        db.add(submission)
+        db.commit()
+        db.refresh(submission)
+
+        activity = StudentActivity(
+            submission_id=submission.id,
+            student_id=student.id,
+            activity_type="focus_lost",
+            is_suspicious=True,
+        )
+        db.add(activity)
+        db.commit()
+        submission_id = submission.id
+        activity_id = activity.id
+        assignment_id = assignment.id
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/teacher/submissions/{submission_id}/delete",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/teacher?submission_deleted=1" in response.headers["location"]
+
+    db = database.SessionLocal()
+    try:
+        assert db.query(Submission).filter(Submission.id == submission_id).first() is None
+        assert db.query(StudentActivity).filter(StudentActivity.id == activity_id).first() is None
+        assert db.query(Assignment).filter(Assignment.id == assignment_id).first() is not None
+    finally:
+        db.close()
+
+
+def test_teacher_can_delete_assignment_with_submissions():
+    """Teacher can delete their assignment with submissions and activity."""
+    client.post(
+        "/login",
+        data={"name": "TeacherDeleteAssignment", "access_code": "teacher123"},
+    )
+
+    db = database.SessionLocal()
+    try:
+        teacher = db.query(User).filter(User.name == "TeacherDeleteAssignment").first()
+        student = User(name="StudentDeleteAssignment", role="student")
+        db.add(student)
+        db.commit()
+        db.refresh(student)
+
+        assignment = Assignment(
+            teacher_id=teacher.id,
+            title="Delete Assignment Task",
+            description="desc",
+            reference_code="print(1)",
+            language_id=71,
+        )
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+
+        submission = Submission(
+            assignment_id=assignment.id,
+            student_id=student.id,
+            code="print(1)",
+            status=SubmissionStatus.ACCEPTED.value,
+        )
+        db.add(submission)
+        db.commit()
+        db.refresh(submission)
+
+        activity = StudentActivity(
+            submission_id=submission.id,
+            student_id=student.id,
+            activity_type="tab_hidden",
+            is_suspicious=True,
+        )
+        db.add(activity)
+        db.commit()
+        assignment_id = assignment.id
+        submission_id = submission.id
+        activity_id = activity.id
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/teacher/assignments/{assignment_id}/delete",
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/teacher?assignment_deleted=1" in response.headers["location"]
+
+    db = database.SessionLocal()
+    try:
+        assert db.query(Assignment).filter(Assignment.id == assignment_id).first() is None
+        assert db.query(Submission).filter(Submission.id == submission_id).first() is None
+        assert db.query(StudentActivity).filter(StudentActivity.id == activity_id).first() is None
+    finally:
+        db.close()
 
 
 def test_unauthorized_access_redirects():
